@@ -200,6 +200,25 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
         # so False = NOT-PROVEN-reachable, not "safe" — an unguarded (F,no) sink is still flagged, just
         # below a proven-reachable one). Honest, avoids ranking everything CRITICAL.
         tainted = bool(getattr(s, "tainted_reachable", False))
+        # AI-SUSPECTED SURFACES ARE ADVISORY — NEVER a deterministic verdict (the honesty invariant).
+        # A model GUESS (detection_source in {ai_suspected, ai_corroborated}, verdict AI_SUSPECTED_REVIEW)
+        # must not run through the deterministic verdict machinery that writes UNGUARDED_CRITICAL_LIVE_SINK
+        # into the shared .verdict field — that single guess would flip a clean repo's RED/AMBER banner,
+        # inflate the reachable count + coverage, and feed the fix-plan. We STILL compute + PRESERVE the
+        # "AI suggests, engine checks reachability" signal, but record it in the SEPARATE advisory field
+        # s.ai_reachability and leave .verdict == "AI_SUSPECTED_REVIEW". The surface still appears in the
+        # dedicated "AI-suspected — needs review" report section; it is only kept out of the deterministic
+        # headline/banner/coverage/fix-plan.
+        if getattr(s, "detection_source", "static") != "static":
+            _wb = _QUADRANT.get((tainted, state), (99, None, "REVIEW"))
+            s.ai_reachability = {
+                "critical_guard_on_path": state,
+                "tainted_reachable": tainted,
+                "severity_rank": _wb[0],
+                "would_be_verdict": _wb[1],        # what the deterministic machinery WOULD have said
+                "note": "advisory only — AI-suspected surface; never a deterministic verdict/headline input",
+            }
+            continue
         counts["attributed"] += 1
         # FP4 auth-gate: an authenticated route (FastAPI Depends(current_org/user)) proves the CALLER is
         # authenticated -> soften BLOCK to REVIEW (never ALLOW, never delete). Sanctioned exception to the

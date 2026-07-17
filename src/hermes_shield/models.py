@@ -117,6 +117,11 @@ class ActionSurface:
     # S2.4 AI-assist tier: static | ai_suspected (model-asserted, AST-line-verified) | ai_corroborated
     detection_source: str = "static"
     ai_confidence: float = 0.0
+    # ADVISORY-ONLY reachability for AI-suspected surfaces. "AI suggests, engine checks reachability" is a
+    # useful signal, but a model GUESS must NEVER land a deterministic verdict in the shared .verdict field
+    # (that leaks into the customer-facing RED/AMBER headline). guard_attribution records the engine's
+    # reachability check HERE instead, leaving .verdict == "AI_SUSPECTED_REVIEW". Empty for static surfaces.
+    ai_reachability: dict = field(default_factory=dict)
     # S6.1 guard-attribution: is a CRITICAL guard proven on EVERY path to this sink? (downgrade-only;
     # unknown = unproven = no. severity_rank is the deterministic ordering key, 0 = most severe.)
     guard_attribution: dict = field(default_factory=lambda: {
@@ -126,6 +131,13 @@ class ActionSurface:
 
     def to_dict(self):
         d = asdict(self)
+        # ADVISORY-ONLY: ai_reachability is populated by guard_attribution for AI-suspected
+        # surfaces only. Static (AI-off) surfaces leave it empty; omit the key entirely then so
+        # the deterministic machine artifacts (hermes_action_surface_scan.json, findings.json)
+        # stay byte-for-byte identical to a pre-fix AI-off scan. It only appears once real
+        # advisory reachability exists, i.e. exactly on the AI path.
+        if not d.get("ai_reachability"):
+            d.pop("ai_reachability", None)
         return d
 
 

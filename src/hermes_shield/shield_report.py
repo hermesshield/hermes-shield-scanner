@@ -71,22 +71,26 @@ def _report_model(scan, repo_name: str) -> dict:
             continue
         seen.add(k)
         rows.append((s, _category(s)))
-    cats = Counter(c for _, c in rows)
-    total = len(rows)
+    # DETERMINISTIC HEADLINE = STATIC ONLY. static_rows was computed but never used — wire it now so the
+    # customer-facing counts (total / gated / no_gate / fake / coverage_pct), the rendered category
+    # sections and the fix plan are built ONLY from deterministic surfaces. AI-suspected surfaces (model
+    # GUESSES, detection_source != "static") are advisory and flow ONLY through ai_rows into the dedicated
+    # "AI-suspected — needs review" section. On an AI-off scan static_rows == rows (byte-identical).
+    static_rows = [(s, c) for s, c in rows if getattr(s, "detection_source", "static") == "static"]
+    cats = Counter(c for _, c in static_rows)
+    total = len(static_rows)
     gated = cats["GATE_UNVERIFIED"]
     no_gate = cats["NO_GATE"] + cats["UNPROVEN"]
     fake = cats["FAKE_GATE"]
-    # detection tiers
-    static_rows = [(s, c) for s, c in rows if s.detection_source == "static"]
     ai_rows = [s for s in scan["surfaces"]
-               if s.context == "prod" and s.detection_source != "static"]
-    by_cap = Counter(s.capability for s, _ in rows)
+               if s.context == "prod" and getattr(s, "detection_source", "static") != "static"]
+    by_cap = Counter(s.capability for s, _ in static_rows)
     return {
         "repo": repo_name, "files_scanned": scan["files_scanned"],
         "total": total, "gated": gated, "no_gate": no_gate, "fake": fake,
         "coverage_pct": (100 * gated // total) if total else 0,
         "by_capability": dict(by_cap.most_common()),
-        "rows": rows, "ai_rows": ai_rows,
+        "rows": static_rows, "ai_rows": ai_rows,
         "ai_counts": scan.get("ai_tier_counts", {}),
     }
 
@@ -108,6 +112,10 @@ def _fix_plan_rows(rows):
     from . import patch_plan as _PP
     out = []
     for s, cat in rows:
+        # AI-suspected surfaces (model GUESSES) never generate a fix-plan / Repairer-feed row. Callers pass
+        # the already-static headline rows, but we exclude non-static here too (belt and braces).
+        if getattr(s, "detection_source", "static") != "static":
+            continue
         if cat not in _FIX_CATS:
             continue
         cap = s.capability
@@ -331,10 +339,17 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
                  "honest-scope note at the bottom.")
 
     _RCE = {"code_exec", "deserialize", "subprocess_exec", "ssti"}
-    live = [s for s in scan["surfaces"] if getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK"]
+    # STATIC ONLY: the banner (above) and the "Reachable in-repo" + install-liability tables (below) are
+    # deterministic — a model GUESS must never appear here. With the writer-side fix an AI surface never
+    # carries UNGUARDED_CRITICAL_LIVE_SINK, but we filter defensively (belt and braces) so it can never
+    # drive the red banner or the reachable table even if a future path re-stamps its verdict.
+    def _is_static(s):
+        return getattr(s, "detection_source", "static") == "static"
+    live = [s for s in scan["surfaces"]
+            if getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK" and _is_static(s)]
     live_ids = {id(s) for s in live}
     il = [s for s in scan["surfaces"] if s.context == "prod" and s.capability in _RCE
-          and id(s) not in live_ids]
+          and _is_static(s) and id(s) not in live_ids]
 
     def esc(x):
         return _html.escape(str(x))

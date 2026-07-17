@@ -220,6 +220,13 @@ def run_scan(root: Path, progress=None, out_dir=None):
             for s in scan["surfaces"]:
                 if getattr(s, "detection_source", "static") != "static":
                     surface_classifier.classify(s)
+                    # HONESTY INVARIANT: classify() sets scope/mutating and (for an unguarded critical) a
+                    # DETERMINISTIC verdict such as BLOCK_LIVE_PROMOTION. That verdict must never stick on a
+                    # model GUESS — it would leak into the deterministic headline. We keep the reachability
+                    # disposition classify computed but RESTORE the advisory verdict, so guard_attribution /
+                    # entrypoint_proof (which now skip non-static surfaces) leave it as AI_SUSPECTED_REVIEW.
+                    s.verdict = "AI_SUSPECTED_REVIEW"
+                    s.live_promotion_verdict = "REVIEW"
             if _ga_graphs is not None:
                 from . import cross_module as _CM, inter_taint as _IT, entrypoint_proof as _EP
                 _m2f = _shared_m2f
@@ -342,8 +349,12 @@ def main(argv=None):
     scan_time = _now()
 
     prod = [s for s in scan["surfaces"] if s.context == "prod"]
-    verdicts = Counter(s.verdict for s in prod)
-    block = [s for s in prod if s.verdict in ("BLOCK_LIVE_PROMOTION", "GUARD_LOST", "UNGUARDED_CRITICAL_LIVE_SINK")]
+    # Deterministic CLI summary counts static findings only — belt-and-braces so a re-stamped
+    # AI-suspected surface can never inflate the printed verdict distribution or BLOCK count
+    # (the writer-side reset already keeps AI surfaces at AI_SUSPECTED_REVIEW; this is defence-in-depth).
+    _static_prod = [s for s in prod if getattr(s, "detection_source", "static") == "static"]
+    verdicts = Counter(s.verdict for s in _static_prod)
+    block = [s for s in _static_prod if s.verdict in ("BLOCK_LIVE_PROMOTION", "GUARD_LOST", "UNGUARDED_CRITICAL_LIVE_SINK")]
 
     overall_drift, drift_findings = "NO_DRIFT", []
     baseline_status = "absent"

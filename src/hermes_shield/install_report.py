@@ -125,7 +125,14 @@ def build_report(root, scan, validated=None) -> dict:
     presented as proven."""
     root = Path(root)
     validated = validated or set()
-    surfaces = [s for s in scan.get("surfaces", []) if getattr(s, "context", "prod") == "prod"]
+    # DETERMINISTIC HEADLINE = STATIC ONLY. Every count below (grounded_crit, candidate_crit, non_gated,
+    # install_liab, vulnerable, candidate_high, proven_live, total) drives the RED/AMBER banner + the
+    # "reachable in-repo" number, so it must be built from deterministic (detection_source == "static")
+    # surfaces alone. AI-suspected surfaces are advisory (model GUESSES) and appear only in the dedicated
+    # AI-suspected review section — never here. On an AI-off scan this filter is a no-op (byte-identical).
+    surfaces = [s for s in scan.get("surfaces", [])
+                if getattr(s, "context", "prod") == "prod"
+                and getattr(s, "detection_source", "static") == "static"]
     total = len(surfaces)
     grounded_crit = [s for s in surfaces if getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK"]
 

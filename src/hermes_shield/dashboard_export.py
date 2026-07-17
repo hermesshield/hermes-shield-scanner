@@ -5,9 +5,13 @@ from collections import Counter
 
 def build(scan: dict, drift_overall: str, drift_findings, patch_items, baseline_status: str, scan_time: str):
     surfaces = scan["surfaces"]
-    verdicts = Counter(s.verdict for s in surfaces)
-    scopes = Counter(s.scope for s in surfaces)
-    block = [s for s in surfaces if s.verdict in ("BLOCK_LIVE_PROMOTION", "GUARD_LOST", "UNGUARDED_CRITICAL_LIVE_SINK")]
+    # DETERMINISTIC HEADLINE = STATIC ONLY. The overall_verdict, block_live_promotion count and top_risks
+    # are deterministic — a model GUESS (detection_source != "static") must never drive them. Verdict/scope
+    # tallies and the block set are built from static surfaces alone; action_surfaces stays a full map count.
+    static = [s for s in surfaces if getattr(s, "detection_source", "static") == "static"]
+    verdicts = Counter(s.verdict for s in static)
+    scopes = Counter(s.scope for s in static)
+    block = [s for s in static if s.verdict in ("BLOCK_LIVE_PROMOTION", "GUARD_LOST", "UNGUARDED_CRITICAL_LIVE_SINK")]
     overall = "BLOCK_LIVE_PROMOTION" if block else ("DRIFT_DETECTED" if drift_overall == "DRIFT_DETECTED" else "PASS_WITH_RESIDUAL_RISK")
     return {
         "overall_verdict": overall,

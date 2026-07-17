@@ -43,6 +43,10 @@ def apply(root: Path, surfaces, patch_items, config=None, graphs=None) -> dict:
     for s in surfaces:
         if s.context != "prod" or s.capability not in PAT.CRITICAL_CAPS:
             continue
+        # AI-suspected surfaces are advisory only: never stamp a deterministic entrypoint verdict on a model
+        # GUESS. Leave .verdict == "AI_SUSPECTED_REVIEW" so it cannot enter the deterministic headline.
+        if getattr(s, "detection_source", "static") != "static":
+            continue
         if s.guard_proof.get("status") == "proven":
             continue
         mod_tail = _dotted(s.file_path).split(".")[-1]

@@ -79,6 +79,10 @@ def build(surfaces):
     """Machine-readable patch plan (hermes_patch_plan.json). Read-only — PLANS a fix, never applies one."""
     items = []
     for s in surfaces:
+        # AI-suspected surfaces (model GUESSES, detection_source != "static") are advisory — they never feed
+        # the deterministic fix plan / Repairer queue. Their verdict stays AI_SUSPECTED_REVIEW; skip them.
+        if getattr(s, "detection_source", "static") != "static":
+            continue
         if s.verdict in ("PROTECTED_FULL_PATH", "STATIC_PROOF_ONLY", "PROVIDER_SCOPE",
                          "PROTECTED_TEXT_PATH_ONLY", "PASS_WITH_RESIDUAL_RISK"):
             continue
