@@ -180,10 +180,17 @@ def run_scan(root: Path, progress=None, out_dir=None):
         scan["guard_integrity_counts"] = guard_integrity.annotate(root, scan["surfaces"])
     except Exception:
         scan["guard_integrity_counts"] = {}
-    # Stream a handful of the REAL reachable-live findings (verdict-confirmed) as the payoff of the trace.
+    # Stream a handful of the REAL reachable-live findings as the payoff of the trace. HONESTY INVARIANT
+    # (live_scan.py:22-24): the red "reachable & unguarded" stream must be driven by the SAME deterministic
+    # predicate as the report's non_gated_vulnerable count — NOT by the raw verdict alone. A raw
+    # UNGUARDED_CRITICAL_LIVE_SINK is written by guard_attribution onto ANY prod+tainted+unguarded
+    # CRITICAL_CAPS surface (a broader set than install_report._VULN_CAPS), so filtering on the verdict alone
+    # let the HUD flash red for a surface the finale correctly resolves to BLUE. install_report
+    # .is_non_gated_vulnerable is that one shared predicate (static + prod + cap ∈ _VULN_CAPS + verdict).
     if progress:
+        from . import install_report as _IR
         _live = [s for s in scan["surfaces"]
-                 if getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK"][:6]
+                 if _IR.is_non_gated_vulnerable(s)][:6]
         for _s in _live:
             _emit(phase="reach", live=(_s.capability, _s.file_path,
                                        getattr(_s, "sink_line", 0) or _s.line_start))
@@ -315,6 +322,10 @@ def main(argv=None):
                          "prove they are live (benign canary, no network). Consent-gated; OFF by default.")
     ap.add_argument("--yes-execute-my-code", dest="yes_execute", action="store_true",
                     help="non-interactive consent for --prove (also: HERMES_SHIELD_PROVE_CONSENT=1)")
+    # S8.94: opt-in cinematic live experience. Purely ADDITIVE — without --live the scan output is
+    # byte-for-byte today's behaviour. On a TTY it streams a sticky HUD + the honest collapse + verdict;
+    # off a TTY it emits stderr checkpoints and leaves stdout clean.
+    ap.add_argument("--live", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -339,12 +350,25 @@ def main(argv=None):
     _tiers = {"ai": os.getenv("HERMES_SHIELD_AI_TIER") == "1",
               "semgrep": os.getenv("HERMES_SHIELD_SEMGREP") == "1",
               "deps": os.getenv("HERMES_SHIELD_DEPS") == "1"}
-    if not args.quiet:
+    live = getattr(args, "live", False)
+    _run_fn = lambda progress=None: run_scan(root, progress=progress, out_dir=out_dir)
+    if args.quiet:
+        # --quiet is quiet whether or not --live is set (the one-line verdict prints after the scan).
+        scan = run_scan(root, out_dir=out_dir)
+    elif live:
+        # S8.94 opt-in cinematic path — sticky HUD on a TTY, stderr checkpoints off a TTY. Ctrl-C tears the
+        # region down cleanly and exits 130; the deterministic scan + artefacts are otherwise untouched.
+        from . import banner, live_scan as _LV
+        banner.print_banner(SCANNER_VERSION, tiers=_tiers, target=f"~/{root.name}")
+        try:
+            scan = _LV.stream_live(_run_fn, tiers=_tiers)
+        except KeyboardInterrupt:
+            sys.stderr.write("\nscan interrupted\n")
+            return 130
+    else:
         from . import banner, stream as _ST
         banner.print_banner(SCANNER_VERSION, tiers=_tiers, target=f"~/{root.name}")
-        scan = _ST.stream_scan(lambda progress=None: run_scan(root, progress=progress, out_dir=out_dir))
-    else:
-        scan = run_scan(root, out_dir=out_dir)
+        scan = _ST.stream_scan(_run_fn)
     head = _head(root)
     scan_time = _now()
 
@@ -436,11 +460,24 @@ def main(argv=None):
     if args.baseline:
         BL.save_baseline(BL.build_baseline(scan, head), baseline_path)
 
+    # --live --quiet: exactly one honest verdict line + the report path (default --quiet stays silent).
+    if args.quiet and live and (args.scan or args.diff):
+        from . import install_report as _IR, live_scan as _LV
+        _LV.render_quiet(_IR.build_report(root, scan, validated), scan, out_dir)
+
     if not args.quiet:
         from . import summary as _SM
-        # On a TTY: the rich results panel (the demo "results landed" moment). Piped/CI: the stable terse
-        # lines (unchanged) so scripts and tests that read stdout are not broken.
-        if _SM._colour(sys.stdout) and (args.scan or args.diff):
+        # --live on a TTY: the cinematic collapse + RED/AMBER/BLUE verdict + point-first block + Repairer
+        # hand-off. Keyed on isatty (NOT colour) so NO_COLOR keeps the glyphs; off a TTY it falls through to
+        # the terse stdout lines below (stdout stays clean, JSON-safe).
+        from . import live_scan as _LV
+        if live and _LV._tty(sys.stdout) and (args.scan or args.diff):
+            from . import install_report as _IR
+            _r = _IR.build_report(root, scan, validated)
+            _LV.render_collapse(_r, scan)
+            _LV.render_finale(_r, scan, out_dir, SCANNER_VERSION)
+        # Default (no --live) on a TTY: the rich results panel (the demo "results landed" moment).
+        elif _SM._colour(sys.stdout) and (args.scan or args.diff):
             from . import install_report as _IR
             # Phase 3/3: rating (fast) — a final beat so the OWASP verdict has a visible step of its own.
             print(f"  \033[38;5;208m▸ 3/3  Rating against OWASP LLM06 · Excessive Agency\033[0m")

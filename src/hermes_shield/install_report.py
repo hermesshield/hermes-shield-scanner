@@ -20,6 +20,31 @@ from pathlib import Path
 _RCE_CAPS = {"code_exec", "deserialize", "subprocess_exec", "ssti"}
 # broader dangerous-action capabilities (write/act) — inherited too, lower severity
 _ACT_CAPS = {"external_write", "file_write", "file_delete", "tool_invoke", "publish_write", "secret_exfil"}
+# the RED-driving vulnerable-capability set (RCE-class | write/act). A surface only counts toward the
+# deterministic non_gated_vulnerable (the ONE number allowed to turn the verdict / HUD red) if its
+# capability is in here — a raw UNGUARDED_CRITICAL_LIVE_SINK verdict alone is NOT sufficient.
+_VULN_CAPS = _RCE_CAPS | _ACT_CAPS
+
+
+def is_non_gated_vulnerable(s) -> bool:
+    """THE single shared predicate for a RED "reachable & unguarded" surface — the honesty source of truth.
+
+    A surface is non-gated-vulnerable iff it is a DETERMINISTIC (static), production, in-scope-capability
+    UNGUARDED_CRITICAL_LIVE_SINK. build_report counts exactly these into `non_gated_vulnerable` (the number
+    that drives the RED verdict band), and the `--live` HUD/stderr stream MUST select red events with this
+    SAME predicate — otherwise Act 1 (live HUD) could flash red for a surface that Act 3 (finale verdict)
+    resolves to blue. Keeping both on one predicate makes that contradiction structurally impossible.
+
+    The two extra clauses beyond `verdict == UNGUARDED_CRITICAL_LIVE_SINK` matter:
+      - detection_source == "static": an AI-suspected model GUESS can never turn anything red (invariant 2).
+      - capability in _VULN_CAPS: guard_attribution writes the verdict onto ANY CRITICAL_CAPS surface, a
+        broader set than _VULN_CAPS; the report only counts _VULN_CAPS, so the stream must match.
+      - context == "prod": non-production (test/example) surfaces are excluded from the deterministic headline.
+    """
+    return (getattr(s, "context", "prod") == "prod"
+            and getattr(s, "detection_source", "static") == "static"
+            and getattr(s, "capability", "") in _VULN_CAPS
+            and getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK")
 
 
 # ---- OWASP Risk Rating (Severity x Likelihood -> Low/Med/High). Refs: OWASP Risk Rating Methodology;
@@ -101,6 +126,27 @@ def install_liability_rating(surfaces) -> dict:
     }
 
 
+def verdict_band(reachable: int, proven: int, install_liab: int) -> dict:
+    """Canonical RED / AMBER / BLUE verdict — the SINGLE source of truth shared by the customer HTML report
+    (shield_report.build_html) and the CLI live experience (live_scan). The thresholds must never diverge,
+    so both call THIS function:
+
+      RED   ("Action needed")          — a reachable + unguarded live sink (deterministic
+                                          UNGUARDED_CRITICAL_LIVE_SINK) OR a proven-live PoC.
+      AMBER ("Review before you ship") — install-liability only (inert here, live on install).
+      BLUE  ("No live threat proven")  — neither. NOT "secure" / not a clean bill of health.
+
+    HONESTY INVARIANT: `reachable` MUST be the deterministic static count (non_gated_vulnerable, built from
+    detection_source == "static" surfaces only in build_report). An AI-suspected GUESS is filtered out
+    upstream and can never reach this function, so it can never turn a verdict RED. `code` is the lower-case
+    band; `head` is the base head string (the report renders it as-is; the CLI upper-cases it)."""
+    if proven > 0 or reachable > 0:
+        return {"code": "red", "icon": "⚠", "head": "Action needed"}
+    if install_liab > 0:
+        return {"code": "amber", "icon": "▲", "head": "Review before you ship"}
+    return {"code": "blue", "icon": "●", "head": "No live threat proven"}
+
+
 def _coverage_pct(root: Path, files_scanned: int) -> float:
     """Coverage = scanned source files / scannable source files present.
 
@@ -175,10 +221,12 @@ def build_report(root, scan, validated=None) -> dict:
     risk_counts = proven_counts   # back-compat name; these are now PROVEN-only
 
     # ---- kicker metrics: gated vs non-gated VULNERABLE surfaces ----
-    _VULN_CAPS = _RCE_CAPS | _ACT_CAPS
     vulnerable = [s for s in surfaces if s.capability in _VULN_CAPS]
-    # NON-GATED vulnerable = reachable + unguarded (the live-threat kicker)
-    non_gated = [s for s in vulnerable if getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK"]
+    # NON-GATED vulnerable = reachable + unguarded (the live-threat kicker). Uses the SHARED
+    # is_non_gated_vulnerable predicate — the SAME one the `--live` HUD selects red events with — so the
+    # HUD stream and this deterministic count can never disagree. (surfaces is already prod+static and
+    # `vulnerable` is already _VULN_CAPS, so this is exactly the prior set; the predicate just names it.)
+    non_gated = [s for s in vulnerable if is_non_gated_vulnerable(s)]
     # GATED vulnerable = reachable dangerous sink that a guard/mitigation downgraded (present but protected)
     gated = [s for s in vulnerable if getattr(s, "tainted_reachable", False)
              and getattr(s, "verdict", "") != "UNGUARDED_CRITICAL_LIVE_SINK"]

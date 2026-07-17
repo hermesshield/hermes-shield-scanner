@@ -299,21 +299,22 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     # ---- THE STATUS BANNER (antivirus-style verdict, first thing on the page). State is encoded in FORM:
     # colour + icon + plain words. One rule, three states — RED (reachable now / proven-live), AMBER
     # (install-liability only), CALM BLUE (neither). Blue is "no live threat PROVEN", never "secure".
+    # CANONICAL verdict — shared with the CLI (install_report.verdict_band) so the HTML banner and the CLI
+    # can never disagree. This chooses the band/icon/head; the human-facing sub-copy is built per-band below.
+    _vb = IR.verdict_band(reachable, proven, install_liab)
+    b_cls, b_icon, b_head = _vb["code"], _vb["icon"], _vb["head"]
     if proven > 0 or reachable > 0:
         n = reachable if reachable else proven
-        b_cls, b_icon, b_head = "red", "⚠", "Action needed"
         b_sub = (f"<b>{n} dangerous {_pl(n, 'action', 'actions')}</b> an attacker can reach in this code "
                  f"right now, with nothing in the way. {_pl(n, 'Fix this first.', 'Fix these first.')}")
         if proven:
             b_sub += (f" <b>{proven}</b> {_pl(proven, 'is', 'are')} proven-live — we demonstrated a real "
                       f"attack path.")
     elif install_liab > 0:
-        b_cls, b_icon, b_head = "amber", "▲", "Review before you ship"
         b_sub = (f"<b>{install_liab} dangerous {_pl(install_liab, 'capability is', 'capabilities are')}</b> "
                  f"inert here but {_pl(install_liab, 'goes', 'go')} live the moment this code is installed "
                  f"and fed untrusted input.")
     else:
-        b_cls, b_icon, b_head = "blue", "●", "No live threat proven"
         b_sub = ("We mapped everything this code can do and found no attacker-reachable action with no "
                  "control. This is not a guarantee your code is secure — see the map below.")
 

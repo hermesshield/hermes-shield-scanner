@@ -179,15 +179,20 @@ def _materialise_demo_target() -> Path:
 
 def _run_demo(args) -> int:
     target = _materialise_demo_target()
+    live = getattr(args, "live", False)
     print("demo target — a deliberately vulnerable toy agent")
     print(f"  a Flask route that eval()s attacker JSON (reachable-live) + an inert shell "
           f"capability (install-liability), copied to {target}")
     passthrough = (["--scan", "--root", str(target)]
                    + (["--out", args.out] if args.out else [])
+                   + (["--live"] if live else [])
                    + (["--quiet"] if args.quiet else []))
     rc = scan_hermes.main(passthrough)
     out_dir, _ = scan_hermes.resolve_out_paths(target, args.out)
-    if not args.quiet:
+    # --live on a TTY already closes on the report path (the finale prints it), so skip the redundant line
+    # there. Off a TTY the finale never runs, so keep the pointer — piped `demo --live` still shows it.
+    live_tty = live and sys.stdout.isatty()
+    if not args.quiet and not live_tty:
         print(f"  full report: {out_dir / 'shield_customer_report.html'}")
     return rc
 
@@ -234,6 +239,11 @@ def main(argv=None):
                                  "default; NOT part of --all. Only run this on a repo you trust.")
             sp.add_argument("--yes-execute-my-code", dest="yes_execute", action="store_true",
                             help="non-interactive consent for --prove (also: HERMES_SHIELD_PROVE_CONSENT=1)")
+        sp.add_argument("--live", action="store_true",
+                        help="opt-in cinematic live scan: a sticky HUD (climbing action-surface map + honest "
+                             "signal tally) while scanning, then the on-screen 'collapse' narrowing to the "
+                             "RED/AMBER/BLUE verdict. Additive — without --live the output is unchanged. On a "
+                             "non-TTY/piped run the HUD is skipped and stdout stays clean (JSON-safe).")
         sp.add_argument("--quiet", action="store_true")
     dp = sub.add_parser("demo",
                         help="scan a bundled, deliberately vulnerable toy agent — a real red "
@@ -248,6 +258,10 @@ def main(argv=None):
                          "trust — in Phase 0 it is contained to the bundled fixture.")
     dp.add_argument("--yes-execute-my-code", dest="yes_execute", action="store_true",
                     help="non-interactive consent for --prove (also: HERMES_SHIELD_PROVE_CONSENT=1)")
+    dp.add_argument("--live", action="store_true",
+                    help="opt-in cinematic live scan of the bundled toy agent — a real, honest RED showcase "
+                         "(sticky HUD, the on-screen collapse, then the verdict). Additive; default demo "
+                         "output is unchanged.")
     dp.add_argument("--quiet", action="store_true")
     sub.add_parser("version")
     args = ap.parse_args(argv)
@@ -310,7 +324,9 @@ def main(argv=None):
     flags = {"scan": ["--scan"], "diff": ["--diff"],
              "export-dashboard": ["--scan"], "patch-plan": ["--scan"]}[args.command]
     passthrough = (flags + (["--root", target] if target else [])
-                   + (["--out", args.out] if args.out else []) + (["--quiet"] if args.quiet else []))
+                   + (["--out", args.out] if args.out else [])
+                   + (["--live"] if getattr(args, "live", False) else [])
+                   + (["--quiet"] if args.quiet else []))
     # --prove is a `scan`-only, consent-gated add-on. Pass it (and its consent flag) straight through to the
     # scan engine, which prints the loud warning + gates before anything executes. NOT part of --all.
     if getattr(args, "prove", False):

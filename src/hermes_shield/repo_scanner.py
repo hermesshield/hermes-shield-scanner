@@ -364,11 +364,21 @@ def scan_repo(root: Path, languages=("python", "typescript", "csharp"), progress
     ingresses: List[UntrustedIngress] = []
     files = 0
 
-    def _tick(new):
+    def _tick(new, relpath=None):
         if progress:
             rce = [(su.capability, su.file_path, getattr(su, "sink_line", 0) or su.line_start)
                    for su in new if su.capability in _RCE_STREAM]
-            progress({"phase": "map", "files": files, "surfaces": len(surfaces), "new": rce})
+            # `file`/`count` are ADDITIVE (S8.94 --live upward log): the current file being read + its
+            # per-file surface count. Extra keys only; existing consumers (stream.py) ignore them, so the
+            # default no-progress path stays byte-identical.
+            progress({"phase": "map", "files": files, "surfaces": len(surfaces), "new": rce,
+                      "file": relpath, "count": len(new)})
+
+    def _rel(p):
+        try:
+            return str(Path(p).relative_to(root))
+        except Exception:
+            return Path(p).name
 
     if "python" in languages:
         for p in _iter_py(root):
@@ -376,18 +386,18 @@ def scan_repo(root: Path, languages=("python", "typescript", "csharp"), progress
             s, ing = scan_file(p, root)
             surfaces.extend(s)
             ingresses.extend(ing)
-            _tick(s)
+            _tick(s, _rel(p))
     if "typescript" in languages:
         for p in _iter_lang(root, ("*.ts", "*.tsx", "*.mts", "*.cts", "*.js", "*.mjs")):
             files += 1
             ts = scan_ts_file(p, root)
             surfaces.extend(ts)
-            _tick(ts)
+            _tick(ts, _rel(p))
     if "csharp" in languages:
         for p in _iter_lang(root, ("*.cs",)):
             files += 1
             cs = scan_cs_file(p, root)
             surfaces.extend(cs)
-            _tick(cs)
+            _tick(cs, _rel(p))
     return {"root": str(root), "files_scanned": files, "scanner_version": SCANNER_VERSION,
             "surfaces": surfaces, "ingresses": ingresses}
