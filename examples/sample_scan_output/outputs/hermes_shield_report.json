@@ -1,0 +1,48 @@
+{
+  "candidate_critical": {
+    "count": 0,
+    "items": []
+  },
+  "candidate_high": 0,
+  "coverage_pct": 100.0,
+  "files_scanned": 2,
+  "gated_vulnerable": 0,
+  "guard_model_note": "python",
+  "install_liability_rating": {
+    "as_installed_likelihood": 2,
+    "band": "Low",
+    "bands": {
+      "High": ">=100",
+      "Low": "<=16",
+      "Med": "17-99"
+    },
+    "count": 2,
+    "method": "severity x as-installed-likelihood(2); per-surface capped at Med; aggregate band by RCE-class count",
+    "note": "inert here, live on install \u2014 the High band is an aggregate-count signal, never a per-surface reachable-here verdict",
+    "per_surface": {
+      "High": 0,
+      "Low": 0,
+      "Med": 2
+    }
+  },
+  "install_liability_rce": 2,
+  "language_mix": {
+    "python": 4
+  },
+  "non_gated_items": [],
+  "non_gated_vulnerable": 0,
+  "overall_rating": "None (no proven-live)",
+  "proven_live": {
+    "count": 0,
+    "items": []
+  },
+  "proven_live_poc": 0,
+  "repo": "vulnerable_agent",
+  "risk_ratings": {
+    "High": 0,
+    "Low": 0,
+    "Med": 0
+  },
+  "total_action_surfaces": 4,
+  "vulnerable_surfaces": 3
+}

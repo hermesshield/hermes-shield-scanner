@@ -1,0 +1,24 @@
+{
+  "action_surfaces": 4,
+  "baseline_status": "absent",
+  "block_live_promotion": 2,
+  "drift_detected": 0,
+  "needs_certification": 1,
+  "needs_retest": 0,
+  "overall_verdict": "BLOCK_LIVE_PROMOTION",
+  "patch_plan_summary": {
+    "blocking": 2,
+    "items": 4
+  },
+  "protected_full_path": 0,
+  "provider_scope": 0,
+  "residual": 0,
+  "scan_time": "2026-07-09T14:06:14+01:00",
+  "scanner_version": "0.1.0",
+  "text_path_only": 0,
+  "top_risks": [
+    "code_exec @ app.py:7",
+    "subprocess_exec @ tools.py:4"
+  ],
+  "untrusted_ingresses": 0
+}

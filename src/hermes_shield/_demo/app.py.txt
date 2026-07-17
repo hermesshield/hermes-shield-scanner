@@ -1,0 +1,12 @@
+# illustrative fixture — not executed. Shipped as .txt so the wheel carries no importable
+# vulnerable code (and won't trip a customer's own scanners); `hermes-shield demo` copies it
+# into a throwaway temp directory as app.py and scans that copy.
+"""Illustrative only — a deliberately-unsafe toy agent for the demo scan. Not real code."""
+from flask import Flask, request
+
+app = Flask(__name__)
+
+@app.post("/run")                       # untrusted HTTP entrypoint
+def run():
+    task = request.json["task"]         # untrusted input
+    return str(eval(task))              # REACHABLE code-exec -> UNGUARDED_CRITICAL_LIVE_SINK

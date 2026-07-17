@@ -1,0 +1,334 @@
+{
+  "files_scanned": 2,
+  "head": "4eeb11278553",
+  "ingresses": [],
+  "root": "examples/vulnerable_agent",
+  "scan_time": "2026-07-09T14:06:14+01:00",
+  "scanner_version": "0.1.0",
+  "surfaces": [
+    {
+      "ai_confidence": 0.0,
+      "auth_gated": false,
+      "capability": "dashboard_mutation",
+      "certified": "unknown",
+      "context": "prod",
+      "dest_provenance": "unknown",
+      "detection_source": "static",
+      "dry_run_supported": "unknown",
+      "file_path": "app.py",
+      "fingerprint": "4c1d571b0ad2d03e",
+      "guard_attribution": {
+        "critical_guard_on_path": "unknown",
+        "guards_found": [],
+        "path_scope": "intraprocedural",
+        "resolution_limits": [],
+        "unguarded_paths": []
+      },
+      "guard_evidence_level": "none",
+      "guard_proof": {
+        "enclosing_symbol": "run",
+        "guard_identity": null,
+        "guard_kind": null,
+        "limitations": [
+          "no recognised guard call reaches this sink"
+        ],
+        "modules_involved": [],
+        "proof_type": "no_guard_found",
+        "scope": "intraprocedural",
+        "sibling_sink_lines": [],
+        "sink_detection_mode": "ast_route",
+        "sink_line": 0,
+        "status": "unproven"
+      },
+      "guards": {
+        "certified": false,
+        "csrf_token": false,
+        "dry_run": false,
+        "final_action_gate": false,
+        "human_approval": false,
+        "kill_switch": false,
+        "markers": [],
+        "strict_hash": false,
+        "untrusted_fence": false
+      },
+      "id": "app.py:7:dashboard_mutation",
+      "ingress_links": [],
+      "language": "python",
+      "likely_lane": "app",
+      "line_end": 9,
+      "line_start": 7,
+      "live_capable": "unknown",
+      "live_promotion_verdict": "BLOCK",
+      "module_scope": true,
+      "mutating": "yes",
+      "patch_recommendations": [
+        "Add dashboard_auth CSRF/token check before this POST route mutates state"
+      ],
+      "protection_confidence": "low",
+      "risk_level": "medium",
+      "scope": "untested_gap",
+      "severity_rank": 99,
+      "shell_form": true,
+      "sink_detection_mode": "ast_route",
+      "sink_line": 7,
+      "sink_name": "route:run",
+      "stable_id": "app.py::run::dashboard_mutation::route:run",
+      "static_artifact_type": "",
+      "symbol": "run",
+      "taint_source": "",
+      "tainted_reachable": false,
+      "tests": {
+        "adversarial": false,
+        "mutation": false,
+        "test_files": []
+      },
+      "verdict": "NEEDS_CERTIFICATION"
+    },
+    {
+      "ai_confidence": 0.0,
+      "auth_gated": false,
+      "capability": "code_exec",
+      "certified": "unknown",
+      "context": "prod",
+      "dest_provenance": "unknown",
+      "detection_source": "static",
+      "dry_run_supported": "unknown",
+      "file_path": "app.py",
+      "fingerprint": "4c1d571b0ad2d03e",
+      "guard_attribution": {
+        "critical_guard_on_path": "no",
+        "guards_found": [],
+        "path_scope": "intraprocedural",
+        "resolution_limits": [],
+        "unguarded_paths": [
+          {
+            "call_line": 7,
+            "entry": "run",
+            "reason": "no_critical_guard_no_caller"
+          }
+        ]
+      },
+      "guard_evidence_level": "none",
+      "guard_proof": {
+        "enclosing_symbol": "run",
+        "guard_identity": null,
+        "guard_kind": null,
+        "limitations": [
+          "no recognised guard call reaches this sink"
+        ],
+        "modules_involved": [],
+        "proof_type": "no_guard_found",
+        "scope": "intraprocedural",
+        "sibling_sink_lines": [],
+        "sink_detection_mode": "ast_call",
+        "sink_line": 0,
+        "status": "unproven"
+      },
+      "guards": {
+        "certified": false,
+        "csrf_token": false,
+        "dry_run": false,
+        "final_action_gate": false,
+        "human_approval": false,
+        "kill_switch": false,
+        "markers": [],
+        "strict_hash": false,
+        "untrusted_fence": false
+      },
+      "id": "app.py:9:code_exec",
+      "ingress_links": [],
+      "language": "python",
+      "likely_lane": "app",
+      "line_end": 9,
+      "line_start": 7,
+      "live_capable": "yes",
+      "live_promotion_verdict": "BLOCK",
+      "module_scope": false,
+      "mutating": "yes",
+      "patch_recommendations": [
+        "Add global kill-switch guard (assert_live_action_allowed) before this outbound action"
+      ],
+      "protection_confidence": "low",
+      "risk_level": "critical",
+      "scope": "untested_gap",
+      "severity_rank": 4,
+      "shell_form": true,
+      "sink_detection_mode": "ast_call",
+      "sink_line": 9,
+      "sink_name": "eval",
+      "stable_id": "app.py::run::code_exec::eval",
+      "static_artifact_type": "",
+      "symbol": "run",
+      "taint_source": "",
+      "tainted_reachable": false,
+      "tests": {
+        "adversarial": false,
+        "mutation": false,
+        "test_files": []
+      },
+      "verdict": "BLOCK_LIVE_PROMOTION"
+    },
+    {
+      "ai_confidence": 0.0,
+      "auth_gated": false,
+      "capability": "external_write",
+      "certified": "unknown",
+      "context": "prod",
+      "dest_provenance": "constant",
+      "detection_source": "static",
+      "dry_run_supported": "unknown",
+      "file_path": "app.py",
+      "fingerprint": "a8475d9358a182e0",
+      "guard_attribution": {
+        "critical_guard_on_path": "unknown",
+        "guards_found": [],
+        "path_scope": "intraprocedural",
+        "resolution_limits": [
+          "sink_at_module_scope"
+        ],
+        "unguarded_paths": []
+      },
+      "guard_evidence_level": "none",
+      "guard_proof": {
+        "enclosing_symbol": "",
+        "guard_identity": null,
+        "guard_kind": null,
+        "limitations": [
+          "sink at module scope; no function to trace"
+        ],
+        "modules_involved": [],
+        "proof_type": "no_enclosing_function",
+        "scope": "intraprocedural",
+        "sibling_sink_lines": [],
+        "sink_detection_mode": "ast_call",
+        "sink_line": 0,
+        "status": "unproven"
+      },
+      "guards": {
+        "certified": false,
+        "csrf_token": false,
+        "dry_run": false,
+        "final_action_gate": false,
+        "human_approval": false,
+        "kill_switch": false,
+        "markers": [],
+        "strict_hash": false,
+        "untrusted_fence": false
+      },
+      "id": "app.py:6:external_write",
+      "ingress_links": [],
+      "language": "python",
+      "likely_lane": "app",
+      "line_end": 6,
+      "line_start": 6,
+      "live_capable": "yes",
+      "live_promotion_verdict": "REVIEW",
+      "module_scope": false,
+      "mutating": "yes",
+      "patch_recommendations": [],
+      "protection_confidence": "low",
+      "risk_level": "critical",
+      "scope": "untested_gap",
+      "severity_rank": 5,
+      "shell_form": true,
+      "sink_detection_mode": "ast_call",
+      "sink_line": 6,
+      "sink_name": "app.post",
+      "stable_id": "app.py::run::external_write::app.post",
+      "static_artifact_type": "",
+      "symbol": "run",
+      "taint_source": "",
+      "tainted_reachable": false,
+      "tests": {
+        "adversarial": false,
+        "mutation": false,
+        "test_files": []
+      },
+      "verdict": "CONFIG_DESTINATION_WRITE_REVIEW"
+    },
+    {
+      "ai_confidence": 0.0,
+      "auth_gated": false,
+      "capability": "subprocess_exec",
+      "certified": "unknown",
+      "context": "prod",
+      "dest_provenance": "unknown",
+      "detection_source": "static",
+      "dry_run_supported": "unknown",
+      "file_path": "tools.py",
+      "fingerprint": "5ae98869c3eb6550",
+      "guard_attribution": {
+        "critical_guard_on_path": "no",
+        "guards_found": [],
+        "path_scope": "intraprocedural",
+        "resolution_limits": [],
+        "unguarded_paths": [
+          {
+            "call_line": 4,
+            "entry": "run_shell",
+            "reason": "no_critical_guard_no_caller"
+          }
+        ]
+      },
+      "guard_evidence_level": "none",
+      "guard_proof": {
+        "enclosing_symbol": "run_shell",
+        "guard_identity": null,
+        "guard_kind": null,
+        "limitations": [
+          "no recognised guard call reaches this sink"
+        ],
+        "modules_involved": [],
+        "proof_type": "no_guard_found",
+        "scope": "intraprocedural",
+        "sibling_sink_lines": [],
+        "sink_detection_mode": "ast_call",
+        "sink_line": 0,
+        "status": "unproven"
+      },
+      "guards": {
+        "certified": false,
+        "csrf_token": false,
+        "dry_run": false,
+        "final_action_gate": false,
+        "human_approval": false,
+        "kill_switch": false,
+        "markers": [],
+        "strict_hash": false,
+        "untrusted_fence": false
+      },
+      "id": "tools.py:5:subprocess_exec",
+      "ingress_links": [],
+      "language": "python",
+      "likely_lane": "tools",
+      "line_end": 5,
+      "line_start": 4,
+      "live_capable": "yes",
+      "live_promotion_verdict": "BLOCK",
+      "module_scope": false,
+      "mutating": "yes",
+      "patch_recommendations": [
+        "Add global kill-switch guard (assert_live_action_allowed) before this outbound action"
+      ],
+      "protection_confidence": "low",
+      "risk_level": "critical",
+      "scope": "untested_gap",
+      "severity_rank": 4,
+      "shell_form": true,
+      "sink_detection_mode": "ast_call",
+      "sink_line": 5,
+      "sink_name": "subprocess.run",
+      "stable_id": "tools.py::run_shell::subprocess_exec::subprocess.run",
+      "static_artifact_type": "",
+      "symbol": "run_shell",
+      "taint_source": "",
+      "tainted_reachable": false,
+      "tests": {
+        "adversarial": false,
+        "mutation": false,
+        "test_files": []
+      },
+      "verdict": "BLOCK_LIVE_PROMOTION"
+    }
+  ]
+}

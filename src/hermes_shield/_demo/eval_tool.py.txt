@@ -1,0 +1,14 @@
+# illustrative fixture — not executed. Shipped as .txt so the wheel carries no importable
+# vulnerable code (and won't trip a customer's own scanners); the prove lane copies it into a
+# throwaway temp directory as eval_tool.py and — only under `demo --prove` with consent — drives
+# it inside a sandbox with a benign canary payload to PROVE the sink is live.
+"""Illustrative only — a directly-drivable code-exec surface for the prove lane.
+
+Unlike app.py's Flask route (whose untrusted input arrives from the `request` global, so the route
+cannot be invoked without standing up the app), this toy 'calculator tool' takes its untrusted input
+as a plain function PARAMETER. The enclosing callable can therefore be invoked directly, which is what
+lets the Phase-0 prove lane drive it in isolation and confirm — with a benign nonce canary — that the
+eval() really executes attacker-controlled input. Not real code."""
+
+def run_task(payload):                  # untrusted param — an agent-/model-chosen expression
+    return eval(payload)                # PROVABLE code_exec sink (reachable + directly drivable)

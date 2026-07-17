@@ -1,0 +1,46 @@
+[
+  {
+    "block_live_promotion": false,
+    "finding": "dashboard_mutation at app.py:7 verdict=NEEDS_CERTIFICATION",
+    "human_approval_required": true,
+    "required_control": "dashboard_auth CSRF token + Origin allowlist",
+    "severity": "medium",
+    "suggested_file": "app.py",
+    "suggested_test": "tests/test_scan_app.py (mock-lane vulnerable+protected)",
+    "surface_id": "app.py:7:dashboard_mutation",
+    "why": "live-capable=unknown; guards=[]"
+  },
+  {
+    "block_live_promotion": true,
+    "finding": "code_exec at app.py:7 verdict=BLOCK_LIVE_PROMOTION",
+    "human_approval_required": true,
+    "required_control": "kill-switch guard + test coverage",
+    "severity": "critical",
+    "suggested_file": "app.py",
+    "suggested_test": "tests/test_scan_app.py (mock-lane vulnerable+protected)",
+    "surface_id": "app.py:9:code_exec",
+    "why": "live-capable=yes; guards=[]"
+  },
+  {
+    "block_live_promotion": false,
+    "finding": "external_write at app.py:6 verdict=CONFIG_DESTINATION_WRITE_REVIEW",
+    "human_approval_required": true,
+    "required_control": "kill-switch guard + test coverage",
+    "severity": "critical",
+    "suggested_file": "app.py",
+    "suggested_test": "tests/test_scan_app.py (mock-lane vulnerable+protected)",
+    "surface_id": "app.py:6:external_write",
+    "why": "live-capable=yes; guards=[]"
+  },
+  {
+    "block_live_promotion": true,
+    "finding": "subprocess_exec at tools.py:4 verdict=BLOCK_LIVE_PROMOTION",
+    "human_approval_required": true,
+    "required_control": "kill-switch guard + test coverage",
+    "severity": "critical",
+    "suggested_file": "tools.py",
+    "suggested_test": "tests/test_scan_tools.py (mock-lane vulnerable+protected)",
+    "surface_id": "tools.py:5:subprocess_exec",
+    "why": "live-capable=yes; guards=[]"
+  }
+]

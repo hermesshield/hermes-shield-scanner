@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-shield-scanner"
+version = "0.7.1"
+description = "Read-only static scanner for AI-agent codebases: finds dangerous action sinks, proves reachability, attributes guard coverage, and rates findings honestly (reachable-verified vs install-liability)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Hermes Shield", email = "hello@hermesshield.ai" }]
+keywords = ["security", "static-analysis", "ai-agents", "llm", "prompt-injection", "excessive-agency"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
+# The core scanner is Python-stdlib-only by design.
+dependencies = []
+
+[project.optional-dependencies]
+# tree-sitter front-ends for TypeScript/JavaScript and C# sink detection (sinks-only tier).
+# Without these the scanner still runs; non-Python files are simply skipped.
+multilang = [
+    "tree-sitter==0.26.0",
+    "tree-sitter-typescript==0.23.2",
+    "tree-sitter-c-sharp==0.23.5",
+]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://hermesshield.ai"
+Repository = "https://github.com/hermesshield/hermes-shield-scanner"
+Changelog = "https://github.com/hermesshield/hermes-shield-scanner/blob/main/CHANGELOG.md"
+
+[project.scripts]
+hermes-shield = "hermes_shield.shield_cli:main"
+# `uvx hermes-shield-scanner scan .` works because an entry point matches the package name.
+hermes-shield-scanner = "hermes_shield.shield_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# _demo/*.txt = the `hermes-shield demo` fixtures — inert text, never importable code.
+hermes_shield = ["config/*.json", "learned_sinks.json", "_demo/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

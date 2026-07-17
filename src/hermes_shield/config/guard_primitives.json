@@ -1,0 +1,25 @@
+{
+  "schema": "hermes_shield.guard_primitives.v1",
+  "notes": "Static identity only; the scanner never executes or imports these modules.",
+  "guard_primitives": [
+    {"id": "kill_switch", "modules": ["shield_kill_switch", "hermes_global_kill_switch"],
+     "symbols": ["assert_live_action_allowed", "check_live_action_allowed", "live_actions_blocked"],
+     "guard_type": "kill_switch", "strength": "strong",
+     "allowed_proof_roles": ["pre_action_guard", "gateway_guard"]},
+    {"id": "final_action_gate", "modules": ["final_action_gate"],
+     "symbols": ["allow_action", "require_final_action_approval"],
+     "guard_type": "final_action_gate", "strength": "strong",
+     "allowed_proof_roles": ["pre_action_guard", "gateway_guard"]},
+    {"id": "approval_hash_gate", "modules": ["hash_ledger", "content_hash", "verify_hash_ledger"],
+     "symbols": ["record_approved", "get_approved", "hash_file"],
+     "guard_type": "approval_hash_gate", "strength": "strong",
+     "allowed_proof_roles": ["pre_publish_guard"]},
+    {"id": "dashboard_csrf", "modules": ["dashboard_auth"],
+     "symbols": ["is_dashboard_post_allowed"], "guard_type": "csrf_token", "strength": "strong",
+     "allowed_proof_roles": ["pre_mutation_guard"]},
+    {"id": "untrusted_fence", "modules": ["hermes_untrusted"],
+     "symbols": ["make_untrusted_content", "wrap_for_action_prompt", "screen_source"],
+     "guard_type": "untrusted_fence", "strength": "strong",
+     "allowed_proof_roles": ["pre_action_guard"]}
+  ]
+}

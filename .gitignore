@@ -1,0 +1,22 @@
+# secrets & local state — never committed
+.env
+.env.*
+*.sqlite
+*.sqlite3
+*.db
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# scanner artefacts & caches
+shield-report/
+*ai_cache*
+# keep the regression test tracked (its name matches *ai_cache* above)
+!tests/test_ai_cache_path_rejects_symlink.py
+.pytest_cache/

@@ -1,0 +1,38 @@
+{
+ "sinks": {
+  "execute_mcp_server_tool": {
+   "capability": "tool_invoke",
+   "provenance": {
+    "repo": "letta",
+    "line": 51,
+    "confirmed_by": [
+     "ai",
+     "gpt"
+    ]
+   }
+  },
+  "execute_composio_action_async": {
+   "capability": "tool_invoke",
+   "provenance": {
+    "repo": "letta",
+    "line": 43,
+    "confirmed_by": [
+     "ai",
+     "gpt"
+    ]
+   }
+  },
+  "execute_tool": {
+   "capability": "tool_invoke",
+   "provenance": {
+    "repo": "llama_index",
+    "line": 274,
+    "confirmed_by": [
+     "ai",
+     "gpt"
+    ]
+   }
+  }
+ },
+ "structural": []
+}

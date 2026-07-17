@@ -1,0 +1,26 @@
+name: Release (build artefacts only)
+
+# Builds the versioned wheel + sdist on a tag and attaches them to the GitHub Release.
+# NO PyPI publish step here — publishing is a deliberate, human-gated action. To enable Trusted
+# Publishing later, add a `pypa/gh-action-pypi-publish` job with OIDC (no long-lived tokens).
+
+on:
+  push:
+    tags: [ "v*" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build wheel + sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Attach artefacts to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

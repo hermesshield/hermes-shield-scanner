@@ -1,0 +1,32 @@
+{
+  "schema": "hermes_shield.entrypoints.v1",
+  "notes": "Reviewed, narrow static model for scanner proof only. No wildcards. Each entry has a reason. Never executes modules. Ships EMPTY: model your own repo's public helpers here (or in the target's .hermes-shield.json). See _example for the shape.",
+  "_example": {
+    "entrypoints": [
+      {
+        "id": "publisher_entry",
+        "module": "myapp.publisher",
+        "symbol": "publish_post",
+        "entrypoint_type": "scheduler_or_cli",
+        "trust_boundary": "live_social_post",
+        "expected_guards": ["kill_switch"],
+        "allowed_helpers": ["myapp.publisher.upload_media"],
+        "proof_policy": "entrypoint_required",
+        "notes": "publish_post is the guarded live-post path; it is the only in-file caller of upload_media."
+      }
+    ],
+    "helpers": [
+      {
+        "module": "myapp.publisher",
+        "symbol": "upload_media",
+        "visibility": "public_helper",
+        "allowed_callers": ["publish_post"],
+        "expected_guards": ["kill_switch"],
+        "proof_policy": "allowed_entrypoint_required",
+        "notes": "Reviewed: only caller is publish_post; the expected guard must run BEFORE the media upload."
+      }
+    ]
+  },
+  "entrypoints": [],
+  "helpers": []
+}

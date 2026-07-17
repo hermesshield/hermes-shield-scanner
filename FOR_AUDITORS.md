@@ -1,0 +1,38 @@
+# For Auditors — Hermes Shield Scanner
+
+*This document is for a security reviewer (e.g. a third-party assessment firm). It states what the tool is, how to reproduce a scan, what's in and out of scope, and its honest limits. British English.*
+
+## 1. Safety — is it safe to run on real/untrusted repos?
+**Yes, for the deterministic core: it is READ-ONLY static analysis and does NOT execute any of the target repository's code.** The optional tiers have specific, documented behaviours (below) — read them before running `--ai`/`--deps`/`--prove` on an untrusted repo. **In particular, `--prove` (opt-in, consent-gated, off by default) DOES execute a benign canary against a candidate sink** — inside a network-denied, read-only, resource-capped bwrap sandbox — to confirm reachability; never run it on a repo you do not trust to execute.
+- It reads source files and parses them with Python's `ast` (and, for TypeScript/C#, optional tree-sitter grammars). It never imports, runs, `eval`s, or `exec`s the target.
+- It writes only its own report, to `./shield-report/` in the current working directory (or `--out DIR`). It never writes into the target or into its own package. The AI-tier cache is written under the **operator output dir**, never under the target root, and is **never written through a symlink** (a hostile repo cannot redirect a cache write to clobber another file — CWE-59).
+- **Untrusted-input hardening (target repo = untrusted).** Traversal skips any `*.py`/source file that is a symlink or whose canonical path resolves **outside** the target root, in the core scanner **and** in AI-tier target selection — so a hostile repo cannot make the tool read (or forward to the AI) arbitrary local files (CWE-61/CWE-22). It reads source *text*; a secret hard-coded in an in-scope file is read like any other line, so it is not accurate to say it "never reads secrets" — keep secrets out of source.
+- **Target-declared guards are advisory.** A repo-local `.hermes-shield.json` that declares guard modules/symbols is **advisory only** and, on its own, cannot downgrade an unguarded critical sink. It is honoured (as a critical guard) only on an explicit operator opt-in made outside the target: `HERMES_SHIELD_TRUST_TARGET_GUARDS=1`, or `HERMES_SHIELD_GUARD_POLICY=<path>` pointing at a trusted policy file **outside** the target root. The scan record's `target_guards` field states whether declarations were trusted.
+- **Optional modes:** `--semgrep` runs *your* semgrep binary (also static, read-only). `--ai` sends selected **in-root** code *text* to *your own local `claude` CLI* for analysis (which may in turn use its configured provider) — no target code is executed, and no credentials are embedded in this package (it uses your existing `claude` auth). `--deps` reaches the **network** to fetch the repo's own pinned first-party packages. `--prove` (Linux + bubblewrap; consent-gated) **executes** a benign canary against a candidate sink inside a network-denied sandbox to promote it to PROVEN-LIVE — promote-only, off by default, never part of `--all`. All are OFF/opt-in.
+
+## 2. Reproduce a scan (5 minutes)
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e ".[multilang]"          # multilang extra = optional tree-sitter for TS/C#
+hermes-shield scan ./examples/vulnerable_agent --out /tmp/out
+```
+Compare `/tmp/out/outputs/` to the committed **`examples/sample_scan_output/outputs/`**. The core scan is **deterministic** — the same input at the same commit yields the same result. (`--ai` is non-deterministic by nature; `--semgrep` is deterministic.) Run the test suite with `PYTHONPATH=src python3 -m pytest tests/` (~377 pass). A handful of `--prove` sandbox tests **skip** when there is no working bwrap sandbox — i.e. in hosted CI (which restricts user namespaces) and off Linux; the off-sandbox "refuse cleanly" contract stays covered everywhere. If you `pip install -e .` first (as above) a bare `pytest tests/` also works; `PYTHONPATH=src` runs the suite against the source tree without an install.
+
+## 3. Determinism (matters for an audit)
+- **Core** and **`--semgrep`** are deterministic — re-run, same output. Use these for reproducible audit runs.
+- **`--ai`** is a non-deterministic recall booster (it uses an LLM). Its findings live in a separate `AI_SUSPECTED` advisory tier and are **never** merged into the deterministic headline.
+
+## 4. Scope — what this package is, and is NOT
+- **IN scope:** the **scanner / discovery engine** — it maps action-surfaces, traces untrusted-ingress→sink reachability, attributes guards, and rates risk (OWASP severity×likelihood). Two output tiers: **reachable-in-repo** (live now) and **install-liability** (inert here, live on install).
+- **OUT of scope (separate product, not in this package):** the **repairer** (which applies guards) and any runtime/continuous protection. This package finds and rates; it does not modify the target.
+- **`proven_live_poc` — 0 unless you opt into `--prove`.** The default scan *maps and rates* surfaces and never executes target code, so `proven_live_poc` is 0 and criticals are reported as **candidates**. The opt-in **`--prove`** lane (added in v0.6.0) is the one exception: when you explicitly enable it and grant consent, it **does** run a benign, unforgeable canary against a *directly-drivable* candidate sink inside a network-denied, filesystem-contained **bubblewrap** sandbox (with a clean negative control), and **promotes** the finding to PROVEN-LIVE only if the canary fires via the sink and reproduces. It is opt-in, consent-gated, sandboxed, and **promote-only** — a failed or refused proof leaves the finding a candidate; the lane never marks anything "safe" and never downgrades. It is **not** part of `--all`, and it structurally **refuses to run without a real bwrap sandbox** (the rlimit-only fallback never executes target code). So "no proven-live" means *not demonstrated exploitable*, **never** "secure".
+
+## 5. Known limits (honest — please hold us to these)
+- **Sound-leaning, not complete.** When it reports a path as reachable, that path is real; *not* finding a path is **not** proof of unreachability. It under-reports rather than over-claims.
+- **Language depth varies.** Python has the full guard/taint model; TypeScript/C# are sinks-only (no guard model yet) — treat their reachability as weaker. `--semgrep` adds broad multi-language *breadth*.
+- **Heuristic detection** — false positives and false negatives are possible. `install-liability` is a *capability inherited on install*, capped at Med severity, and is **not** a claim of a live vulnerability in the scanned repo.
+- **`--prove` is narrow by design.** It only auto-proves *directly-drivable* sinks in the provable-capability set (`code_exec`, `ssti`, and the shell-form `subprocess_exec` case) whose injectable argument is tainted by a direct function parameter; anything needing an app bootstrap, a non-Python target, or a non-provable capability gets a **manual PoC recipe**, never an auto-run. An empty proven-live set therefore means *not proven by this lane*, not *safe*. It requires Linux + bubblewrap and refuses cleanly otherwise.
+- Full detail in `ARCHITECTURE.md` (pipeline, detection, reachability model, rating, and a metadata-drift note).
+
+## 6. Contact / responsible disclosure
+Security contact: **hello@hermesshield.ai**. If your review surfaces a genuine issue in the scanner itself, or you'd like the methodology walked through, that's the address. We practise responsible disclosure on anything we find in third-party code (surface/install-liability counts are public; any live-reachable finding on a named party is shared privately with that party first).
