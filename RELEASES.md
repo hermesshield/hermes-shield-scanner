@@ -16,7 +16,8 @@ different build. The assessment record (findings + remediation) is in `CHANGELOG
 
 | Version | Git tag | Date | Notes |
 |---|---|---|---|
-| 0.7.0 | `v0.7.0` | 2026-07-16 | current — report redesign · `.get()` recall · Windows-safe `--prove` · SECURITY.md / CI |
+| 0.7.1 | `v0.7.1` | 2026-07-17 | **current — first public release.** On PyPI: `pip install hermes-shield-scanner`. Live-install verified on Linux/macOS/Windows × py3.10–3.13. |
+| 0.7.0 | `v0.7.0` | 2026-07-16 | report redesign · `.get()` recall · Windows-safe `--prove` · SECURITY.md / CI |
 | 0.6.0 | `v0.6.0` | 2026-07-16 | proven-live self-attack lane (opt-in `--prove`, sandboxed, promote-only; dataflow drivability; shell-injection proving) |
 | 0.5.0 | `v0.5.0` | 2026-07-16 | launch-hardening — report reframe · Windows fixes · demo / detect-pick / `--version` · Apache-2.0 licence |
 | 0.4.0 | `v0.4.0` | 2026-07-16 | security — third-party re-assessment remediation (HS-01/02/03/04 + fetch-time-RCE closed, all in optional tiers) |
