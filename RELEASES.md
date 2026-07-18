@@ -3,20 +3,27 @@
 The public record of **what shipped, when — and how to reproduce or roll back any version**. Every release
 is tagged in git and kept as an immutable artifact, so any version can be checked out and re-built byte-for-byte.
 
-## The deterministic core is unchanged across these versions
+## The deterministic core: what's stable, and what deliberately evolves
 
-The **deterministic core** — the read-only AST scanner, taint/reachability engine, guard model, and rating —
-is **byte-identical across the versions below**. Later releases add *optional, off-by-default* tiers
-(`--ai`, `--semgrep`, `--deps`, `--prove`) and fix issues in those tiers or in the docs/packaging; none of
-them change the core's logic, numbers, or outputs. That is what makes "independently assessed" defensible:
-the core that was **independently security-assessed (twice)** is the **same core that ships today** — not a
-different build. The assessment record (findings + remediation) is in `CHANGELOG.md` and `FOR_AUDITORS.md`.
+The **safety properties** of the deterministic core — read-only, fully local, never executes the target's
+code, symlink-safe traversal — hold across **every** version below and are regression-locked. What the core
+**detects** and how it **rates** a finding does deliberately improve over time: each change is
+recall-additive or verdict-correcting, itemised per-version in `CHANGELOG.md`, and locked by a regression
+test so it cannot silently reverse. Later releases also add *optional, off-by-default* tiers (`--ai`,
+`--semgrep`, `--deps`, `--prove`) confined to those tiers.
+
+The independent security assessments were of **v0.1.0** (first pass) and **v0.3.7** (re-assessment). Every
+core change since those builds is recorded in `CHANGELOG.md`, so an auditor can diff the assessed tree
+against any later tag — `git diff v0.3.7 vX.Y.Z`. **Re-validation of the current core against the
+assessment is pending.** Within a single version the core is deterministic: same input, same output,
+byte-for-byte. The assessment record (findings + remediation) is in `CHANGELOG.md` and `FOR_AUDITORS.md`.
 
 ## Shipped versions
 
 | Version | Git tag | Date | Notes |
 |---|---|---|---|
-| 0.7.1 | `v0.7.1` | 2026-07-17 | **current — first public release.** On PyPI: `pip install hermes-shield-scanner`. Live-install verified on Linux/macOS/Windows × py3.10–3.13. |
+| 0.8.0 | *(pending tag — this branch)* | 2026-07-18 | **current (unreleased).** Core verdict-taxonomy change — output **intentionally NOT identical to 0.7.x**: reachable, unguarded agent-action sinks now band RED (high-impact/irreversible) or AMBER (reversible/social) instead of BLUE; dedup folds a partition to its worst-banded member. Detail in `CHANGELOG.md`. |
+| 0.7.1 | `v0.7.1` | 2026-07-17 | **first public release.** On PyPI: `pip install hermes-shield-scanner`. Live-install verified on Linux/macOS/Windows × py3.10–3.13. |
 | 0.7.0 | `v0.7.0` | 2026-07-16 | report redesign · `.get()` recall · Windows-safe `--prove` · SECURITY.md / CI |
 | 0.6.0 | `v0.6.0` | 2026-07-16 | proven-live self-attack lane (opt-in `--prove`, sandboxed, promote-only; dataflow drivability; shell-injection proving) |
 | 0.5.0 | `v0.5.0` | 2026-07-16 | launch-hardening — report reframe · Windows fixes · demo / detect-pick / `--version` · Apache-2.0 licence |
@@ -53,5 +60,7 @@ The full, dated change detail for every version is in **`CHANGELOG.md`**.
 4. Commit, then tag: `git tag -a vX.Y.Z -m "..."`.
 5. Build the versioned artifact from the tag (tracked files only — no local cruft).
 6. Add a row to the table above (version, tag, date, notes).
+7. **Update the site truth file in the same change** — `hermes_shield_site/content/hermes-shield-truth.json`
+   (`scanner_version` and any quoted metrics) — so the site never drifts from the shipped package.
 
 One source of truth: this ledger for *what shipped and how to reproduce it*, `CHANGELOG.md` for *the detail*.

@@ -9,6 +9,10 @@ asserted on every repo — no network). The numbers are a **de-inflation** of an
 corrections applied can only *remove* false positives, never add findings.
 
 - **Date of record:** 2026-07-08
+- **Scanner engine of record:** as of 2026-07-08 — **pre-v0.3.6**. These figures predate three later
+  recall/verdict changes to the deterministic core (0.3.6 scope-path recall, 0.7.0 `.get()` untrusted-source
+  recall, and the v0.8.0 verdict taxonomy + dedup worst-band fold). See the reproduction note at the foot of
+  this file — a re-run on a current engine will report **different (generally higher)** counts.
 - **Mode:** local, deterministic core + cache-only AI tier (no network, `ai_calls == 0`)
 - **Headline metric:** **install-liability** — the dangerous capability (code-exec / deserialize / shell /
   SSTI class) a user **inherits the moment they install** and wire the tool into an agent that reads
@@ -53,5 +57,19 @@ public GitHub star figure for these 12 repositories, not a scanner output.)*
   skipped — so the AI net-new contribution is a floor, not a ceiling.
 
 Full methodology, the three corrections, and the brutally-honest "what actually moved" breakdown are in the
-internal scan record this file is derived from (Stage S8.85, 2026-07-08). This document reproduces the
-numbers of record for public verification; re-run the scanner against the same pinned commits to reproduce them.
+internal scan record this file is derived from (Stage S8.85, 2026-07-08).
+
+## Reproducing these figures (engine-version stamp)
+
+These figures were produced by the scanner **engine as of the date of record, 2026-07-08 (pre-v0.3.6)**.
+Later engine versions have strictly higher recall and, **as of v0.8.0**, a revised verdict taxonomy
+(reachable, unguarded agent-action sinks now band RED/AMBER rather than BLUE), so a re-run with a **current**
+version will report **different — generally higher** — counts. To reproduce these **exact** figures, check
+out the engine as of the record date (the pre-v0.3.6 tree) and scan the same pinned commits. A refreshed
+12-framework run on v0.8.0, re-stamped, is **pending**.
+
+<!-- PROPOSED (pending Harley/Bill sign-off): before these numbers are quoted publicly again (README, site
+free-scan, truth.json, deck all cite them), either (a) re-run the full 12-framework benchmark on v0.8.0 and
+publish refreshed, version+date-stamped figures here as the single source of truth, or (b) keep this table
+explicitly marked "historic — pre-v0.3.6 engine". Do NOT quote 8,509 / 474 / 520 as current v0.8.0 output. -->
+

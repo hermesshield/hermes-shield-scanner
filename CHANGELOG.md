@@ -3,7 +3,13 @@
 All notable changes to the Hermes Shield scanner are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
-## [Unreleased] — actions-firewall: reachable agent-action sinks are no longer under-reported
+## [0.8.0] — 2026-07-18  ·  actions-firewall + dedup-worst-band hardening (intentional core verdict change)
+
+**MINOR bump (SemVer): this is a deliberate core verdict-behaviour change — output is intentionally NOT
+byte-identical to 0.7.x.** Two hardenings: (1) reachable, unguarded **agent-action sinks** (payment /
+message-send / post / …) now drive a RED or AMBER verdict instead of a false BLUE "no live threat proven";
+(2) dedup now folds each partition to its **worst-banded** member so a benign sibling can no longer hide a
+dangerous one. Re-validation of this core against the independent assessment (last of v0.3.7) is pending.
 
 ### Changed — VERDICT BEHAVIOUR (intentional core change; output is deliberately NOT byte-identical)
 - **Closed the actions-firewall gap.** `guard_attribution` stamps `UNGUARDED_CRITICAL_LIVE_SINK` onto **any**
@@ -52,7 +58,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
   added regression tests for AI-suspected action sinks (still never red/amber), a clean repo (still BLUE), the
   HTML red/amber banners, and — for the fix-plan/Repairer-feed partition — that an amber action is routed to
   the review tier (never the red fix-first table) and is never `block_live_promotion`, that a red action still
-  blocks, and that hard-block verdicts still block. Suite: **422 passed**.
+  blocks, and that hard-block verdicts still block. (Shipped suite count for this release is recorded once,
+  at the end of this entry: **463 passed, 0 skipped**.)
 
 ### Changed — DEDUP HARDENING: "a safe sink can no longer hide a dangerous one" (Fable-5 under-report class, structurally closed)
 

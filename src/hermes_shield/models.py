@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional, Dict
 
-SCANNER_VERSION = "0.7.1"
+SCANNER_VERSION = "0.8.0"
 
 # capability taxonomy
 CAPABILITIES = [

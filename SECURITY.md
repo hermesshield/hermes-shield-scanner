@@ -38,5 +38,11 @@ disruption, and give us reasonable time to remediate before public disclosure.
 
 ## Our own assurance
 
-The scanner has been independently security-assessed by a third-party security firm (0 critical / 0 high
-findings on the latest assessment). See `FOR_AUDITORS.md` for scope and reproduction details.
+The scanner has been independently security-assessed twice by an independent security reviewer (latest
+assessment, of v0.3.7: 0 critical / 0 high). Findings and remediation are recorded in `CHANGELOG.md`; core
+changes since the assessed build are itemised there too. See `FOR_AUDITORS.md` for scope and reproduction
+details.
+<!-- PROPOSED (pending Harley/Bill sign-off): kept "independent security reviewer" (an individual), not
+"third-party security firm" — per the deck's own honesty rule (never imply a firm/Halborn engagement until
+one publishes). Revert to "firm" only once a formal firm audit is published. -->
+

@@ -18,6 +18,10 @@
 
 </div>
 
+<!-- PROPOSED (pending Harley/Bill sign-off): "audited" (here and at "12 open-source agent frameworks audited" below, plus BENCHMARKS.md's "scan of record") overstates a read-only static scan — no finding is proven. Recommend one consistent verb — "scanned" (or "mapped") — for the 12-framework work across scanner + site + deck, reserving "assessed/audited" for the scanner's OWN third-party review. Human sign-off needed on the verb change (marketing-facing). -->
+<!-- PROPOSED / PENDING RE-RUN (pending Harley/Bill sign-off): the 8,509 / 474 / 520 figures quoted below and in BENCHMARKS.md are from the 2026-07-08 record, produced by a PRE-v0.3.6 engine — superseded by the 0.3.6 scope-path recall, the 0.7.0 .get() recall, and the v0.8.0 verdict-taxonomy/dedup changes. A re-run on v0.8.0 will report different (generally higher) counts. Either re-run the 12-framework benchmark on v0.8.0 and publish refreshed stamped numbers, or keep the table clearly marked historic (BENCHMARKS.md is now version-stamped). -->
+
+
 ---
 
 > **Assume the model will fail. The dangerous action still must not execute.**
@@ -123,15 +127,16 @@ The report is built to be read by two people at once: the founder who needs a ve
 
 **The verdict banner** — antivirus-style, one glance:
 
-- 🔴 **Action needed** — a proven-live or reachable-unguarded finding exists. Fix first.
-- 🟠 **Review before you ship** — install-liability present: inert here, live on install.
+- 🔴 **Action needed** — a proven-live, or a reachable-unguarded **high-impact/irreversible** action (RCE-class, payment, data-out, message-send) exists. Fix first.
+- 🟠 **Review before you ship** — either a reachable **reversible/social** action (post, reply, like, browser click) worth a human look, or **install-liability**: inert here, live on install.
 - 🔵 **No live threat proven** — clean run. Deliberately *never* worded "secure".
 
 **The two tiers** — because "exploitable now" and "inherited on install" are different risks, and honest tooling refuses to blur them:
 
 | Tier | Meaning |
 |---|---|
-| **Reachable-in-repo** | Live **now**, from your own entry points, unguarded. Fix first. |
+| **Reachable — fix first (red)** | A **high-impact/irreversible** action (RCE-class, payment, data-out, message-send) live **now**, from your own entry points, unguarded. Fix first. |
+| **Reachable — review (amber)** | A **reversible/social** action (post, reply, comment, like, browser click) reachable now — worth a human look before you ship. |
 | **Install-liability** | **Inert here, live on install.** A dangerous capability not reached from this repo's entry points — but the moment someone wires this code into an agent that feeds it untrusted input, they inherit it. You downloaded it; you inherited the risk. |
 
 **PROVEN-LIVE** is the strictest tier of all: PoC-confirmed findings — either human-traced, or proved by the opt-in **`--prove`** lane, which fires a benign, unguessable canary at a candidate sink inside a network-denied sandbox (with a clean negative control) and only promotes it if the attack actually lands. It is the only tier that ever gets a severity badge, and promotion is one-way: a failed proof leaves a finding a *candidate*, never marks it safe. Raw scanner criticals are candidates — counted, never badged. If the proven-live set is empty, the report says so, plainly.
@@ -142,9 +147,14 @@ And the line we will never soften: **a clean result means "no path was proven" �
 
 ## `▸ prove_dont_guess` — proof it's real
 
+<!-- PROPOSED (pending Harley/Bill sign-off): this CVE claim is the package's headline proof point but has NO in-repo evidence — no test, fixture, or reproduction recipe mentions CVE-2023-39662 (grep of tests/ + src/ finds it only in README/PKG-INFO). Recommend adding a pinned reproduction recipe (docs/ or BENCHMARKS.md: exact `pip download llama-index==0.7.13`, the scan command, the expected file:line) and ideally a CI-locked regression test that scans the single vulnerable file (vendored under fixtures with a licence note). Also RE-CONFIRM on the v0.8.0 engine before release, since the verdict taxonomy changed. Human sign-off needed before this stays as a headline claim unbacked in-repo. -->
 - **It catches a real 9.8.** [CVE-2023-39662](https://nvd.nist.gov/vuln/detail/CVE-2023-39662) — the CVSS 9.8 remote-code-execution flaw in LlamaIndex's `PandasQueryEngine` — is flagged by the scanner **at the exact documented line, on the genuinely vulnerable release** (`llama-index` v0.7.13; patched upstream since). A detector proof against a third-party-documented CVE — not a benchmark we wrote for ourselves, and not a claim about current LlamaIndex.
 - **12 open-source agent frameworks audited** — over **361,000 combined GitHub stars**, every repo pinned to a commit — mapping **8,509 action surfaces**: **474 proved reachable** from a real entry point by entrypoint-grounded taint tracing, and **520 install-liability capabilities** you'd inherit the moment you install (the two are distinct risks, counted separately). The per-framework counts and pinned commits are in **[BENCHMARKS.md](BENCHMARKS.md)**.
-- **Independently security-assessed — twice.** A third-party firm assessed the scanner, then re-assessed the fixed build: the latest assessment confirmed **0 critical and 0 high** findings in the shipped deterministic core, and **every** finding it raised, at any severity, was remediated in the next release and locked in with the auditor's own regression tests. The tool that grades your attack surface has had its own graded — and published the loop.
+- **Independently security-assessed — twice.** An independent security reviewer assessed the scanner (v0.1.0), then re-assessed the fixed build (v0.3.7): the re-assessment confirmed **0 critical and 0 high** findings **in the build it assessed**, and **every** finding it raised, at any severity, was remediated in the next release and locked in with the reviewer's own regression tests. Core changes since the assessed build are itemised in [CHANGELOG.md](CHANGELOG.md); re-validation of the current core is pending. The tool that grades your attack surface has had its own graded — and published the loop.
+<!-- PROPOSED (pending Harley/Bill sign-off): the FIRST pass (v0.1.0) found 2 High + 1 Medium (AI-cache symlink arbitrary write; symlink traversal — High with --ai / Medium core-only), all remediated in v0.3.7 with the reviewer's own regression tests. Disclosing the first-pass Highs and their closure is a STRONGER trust signal than omitting them; recommended wording: "first pass: 2 High + 1 Medium, all closed in v0.3.7". Human decision needed on whether to surface the first-pass Highs in the public README. -->
+<!-- PROPOSED (pending Harley/Bill sign-off): "independent security reviewer" was an individual, not a firm — the deck's own honesty rule (DECK_CONTEXT.md:192) forbids implying a Halborn/firm engagement until one is published. Keep "reviewer", not "firm", until a firm audit is published. -->
+<!-- PENDING RE-CONFIRM: this claim asserts 0 critical/0 high for the ASSESSED build (v0.3.7). The core shipping on this branch (v0.8.0) includes the 0.7.0 .get() recall and the verdict-taxonomy/dedup changes, none of which were assessed — hence "re-validation of the current core is pending" above. -->
+
 - **Deterministic where it counts.** The core engine is reproducible byte-for-byte — an auditor can re-run the scan and get the same numbers. The honest caveats above aren't hedges; they're the reason the numbers can be trusted.
 
 ## `▸ the_ladder` — find it free · fix it · shield it
