@@ -37,11 +37,41 @@ from __future__ import annotations
 import itertools
 import os
 import queue
+import re
+import shutil
 import sys
 import threading
 import time
 
 from . import install_report as _IR
+
+# ANSI SGR escape sequences carry zero visible width; the clamp below skips them when counting columns.
+_ANSI_RE = re.compile(r"\033\[[0-9;?]*[A-Za-z]")
+
+
+def _clamp_visible(line: str, width: int) -> str:
+    """Truncate `line` to at most `width` VISIBLE columns, preserving ANSI SGR codes (which have no width)
+    and closing with a reset if we cut. Keeps a long file path from spilling the sticky HUD past its fixed
+    row count — a wrapped HUD line would desync the cursor math in _Hud.frame and corrupt the region."""
+    if width <= 0:
+        return line
+    out, visible, i, n, cut = [], 0, 0, len(line), False
+    while i < n:
+        m = _ANSI_RE.match(line, i)
+        if m:
+            out.append(m.group(0))
+            i = m.end()
+            continue
+        if visible >= width:
+            cut = True
+            break
+        out.append(line[i])
+        visible += 1
+        i += 1
+    s = "".join(out)
+    if cut:
+        s += _R
+    return s
 
 # --- Sunset-terminal palette (matches banner.py / summary.py) ---
 _O = "\033[38;5;208m"     # blaze orange — the map / breadth (never danger)
@@ -337,7 +367,11 @@ class _Hud:
         for ln in self._pending:
             self._w(ln + "\n")
         self._pending = []
-        self._w("\n".join(hud_lines) + "\n")
+        # Clamp each HUD line to the terminal width (minus one column so a full-width line can't wrap on
+        # terminals that scroll at the last column). A wrapped line would occupy >1 physical row and desync
+        # the `\033[{_HUD_H}F` cursor math, corrupting the sticky region — long file paths are the usual cause.
+        _w = max(1, shutil.get_terminal_size((80, 24)).columns - 1)
+        self._w("\n".join(_clamp_visible(ln, _w) for ln in hud_lines) + "\n")
         self._drawn = True
         self.s.flush()
 
@@ -373,6 +407,11 @@ def render_collapse(report: dict, scan: dict, stream=None, animate=None):
     animate = _tty(stream) if animate is None else animate
     f = funnel(report, scan)
     stages = f["stages"]
+    # BLOCKER 3: the red funnel collapses to `unguarded` (non_gated_vulnerable). On an amber-only repo that
+    # is 0 — but reachable AMBER actions / fixed-destination sends still remain, and Act 3 will render AMBER.
+    # A blue "0 · no live path proven" coda here would flatly contradict that. Count the amber remainder so
+    # the closing coda can be amber-aware instead of a false all-clear.
+    amber_remaining = int(report.get("reachable_amber_actions", 0)) + int(report.get("reachable_fixed_dest_review", 0))
 
     def w(s):
         try:
@@ -416,6 +455,13 @@ def render_collapse(report: dict, scan: dict, stream=None, animate=None):
         if last and val > 0:
             num_c = _HEAT
             mark = f"   {_c(_HEAT, colour)}← the number that matters{_r(colour)}"
+        elif last and amber_remaining > 0:
+            # BLOCKER 3: 0 red, but reachable amber actions remain -> amber-aware coda, never a blue all-clear
+            # (Act 2 must not contradict Act 3's AMBER verdict on an amber-only repo).
+            num_c = _A
+            _noun = "action remains" if amber_remaining == 1 else "actions remain"
+            mark = (f"   {_c(_A, colour)}← 0 red · {amber_remaining} reachable {_noun} — "
+                    f"review{_r(colour)}")
         elif last:
             num_c = _BLU
             mark = f"   {_c(_BLU, colour)}← collapsed to 0 · no live path proven{_r(colour)}"

@@ -250,6 +250,43 @@ def test_red_appears_in_exactly_one_place_in_the_collapse(tmp_path):
     assert all("reachable AND unguarded" in ln or "the number that matters" in ln for ln in red_lines)
 
 
+def test_amber_only_collapse_coda_is_amber_aware_not_blue(tmp_path):
+    """BLOCKER 3: on an amber-only repo (0 red, but reachable amber actions / fixed-dest sends remain) the
+    Act-2 collapse must NOT close 'collapsed to 0 · no live path proven' — a blue all-clear that would flatly
+    contradict Act-3's AMBER verdict. The closing coda is amber-aware: '0 red · N reachable actions remain —
+    review', carrying amber (never heat-red)."""
+    import re
+    s = _surf(cap="post", verdict="UNGUARDED_CRITICAL_LIVE_SINK", source="static", reachable=True, symbol="p")
+    rep, scan = _report([s], root=tmp_path)
+    assert rep["non_gated_vulnerable"] == 0            # 0 red — the funnel collapses to zero
+    assert rep["reachable_amber_actions"] == 1         # but one amber action remains
+    band = IR.verdict_band(rep["non_gated_vulnerable"], rep["proven_live_poc"],
+                           rep["install_liability_rce"], rep["reachable_amber_actions"],
+                           rep["reachable_fixed_dest_review"])
+    assert band["code"] == "amber"                     # Act-3 says AMBER
+
+    out = _render_collapse_coloured(rep, scan)
+    clean = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
+    assert "no live path proven" not in clean, "amber-only repo must not close with a blue all-clear coda"
+    assert "0 red" in clean and "review" in clean and "reachable action" in clean
+    # the amber coda carries amber colour, never heat-red (invariant #2: red is EARNED-only)
+    coda = next(ln for ln in out.splitlines()
+                if "reachable action" in re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", ln))
+    assert LV._A in coda and LV._HEAT not in coda
+
+
+def test_clean_repo_collapse_coda_stays_blue(tmp_path):
+    """BLOCKER 3 anti-over-fire: a genuinely clean repo (0 red, 0 amber) still closes with the blue
+    'no live path proven' coda — the amber-aware branch must only fire when amber actions actually remain."""
+    import re
+    clean = [_surf(cap="post", verdict="READ_ONLY_SURFACE", reachable=False, symbol=f"s{i}") for i in range(5)]
+    rep, scan = _report(clean, root=tmp_path)
+    assert rep["non_gated_vulnerable"] == 0 and rep["reachable_amber_actions"] == 0
+    clean_txt = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", _render_collapse_coloured(rep, scan))
+    assert "no live path proven" in clean_txt
+    assert "reachable action" not in clean_txt
+
+
 def test_blue_on_clean_fixture_even_with_a_huge_map(tmp_path):
     """Invariant #4: a clean repo (nothing reachable-unguarded, nothing install-liability) is BLUE, and the
     copy is 'no live threat proven', explicitly NOT a clean bill of health — regardless of map size."""

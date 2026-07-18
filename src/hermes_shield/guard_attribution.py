@@ -215,19 +215,29 @@ def _one_hop_guarded(surface, fg: FileGraph, sink_fn: str, graphs: Dict[str, Fil
     if not f:
         return None
     sink_line = getattr(surface, "sink_line", 0) or surface.line_start
-    # names called exactly at the sink line (plain function calls only — a method on an unresolved receiver
-    # or a dotted dynamic import is not one-hop resolvable and must stay severe).
+    # BLOCKER 1: bind the guard credit to THIS surface's OWN sink call — never a sibling/nested call that
+    # merely shares the physical line. The physical line can carry several plain-name calls (a guarded
+    # sibling, or an enclosing wrapper wrapping the real sink's RESULT); crediting ANY of them would let a
+    # guarded neighbour hijack the credit for an unrelated, genuinely-unguarded sink and silence a real
+    # exfil to BLUE. So we consider ONLY the callee whose bare name IS this surface's sink call name
+    # (surface.sink_name == the sink's own call_expr). A dotted/method sink never matches (it carries "."),
+    # so it is never one-hop credited — correctly staying severe.
+    own = (getattr(surface, "sink_name", "") or "").strip()
     names = [bare for (ln, bare, _dotted, is_method) in f["all_calls"]
-             if ln == sink_line and bare and not is_method and "." not in bare]
+             if ln == sink_line and bare and not is_method and "." not in bare and bare == own]
     for name in names:
         if name == sink_fn:
             continue                                          # never descend into self (recursion)
         callee_fg, callee_fn, callee_rel = _resolve_callee(name, fg, surface.file_path, graphs, mod2files)
         if not callee_fg or callee_fn not in callee_fg.funcs:
             continue
-        inner = [ln for ln in inner_sinks.get((callee_rel, callee_fn), []) if ln != sink_line]
+        # BLOCKER 1 (cont.): the credited inner sink must bear THIS surface's capability — a wrapper whose
+        # only guarded inner sink is of a DIFFERENT capability is not proof that the surface's own action is
+        # guarded. inner_sinks carries (line, capability); filter to the surface's capability.
+        inner = [ln for (ln, icap) in inner_sinks.get((callee_rel, callee_fn), [])
+                 if ln != sink_line and icap == cap]
         if not inner:
-            continue                                          # no proven inner sink -> nothing to credit
+            continue                                          # no proven same-capability inner sink to credit
         guards, ok = [], True
         for inner_line in inner:
             g = _critical_before(callee_fg, callee_fn, inner_line, cap)
@@ -260,7 +270,9 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
     from .cross_module import build_mod2files
     mod2files = build_mod2files(graphs)
     # Fix 2: index of every critical-capability sink by (file, enclosing_fn) so the one-hop descent can find
-    # a wrapper callee's OWN inner action sink line(s) and check they are critically guarded.
+    # a wrapper callee's OWN inner action sink line(s) and check they are critically guarded. Each entry is
+    # (sink_line, capability) so BLOCKER 1's one-hop credit can require the inner sink to bear the SURFACE's
+    # OWN capability (a guarded inner sink of a different capability is not proof this surface is guarded).
     from collections import defaultdict as _dd
     inner_sinks = _dd(list)
     for _s in surfaces:
@@ -272,7 +284,7 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
         _ln = getattr(_s, "sink_line", 0) or _s.line_start
         _fn = _g.enclosing(_ln)
         if _fn:
-            inner_sinks[(_s.file_path, _fn)].append(_ln)
+            inner_sinks[(_s.file_path, _fn)].append((_ln, _s.capability))
     counts = {"unguarded_critical": 0, "guarded_review": 0, "partial": 0, "unknown": 0,
               "unguarded_unproven_reach": 0, "attributed": 0}
     _total = len(surfaces)
@@ -288,6 +300,14 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
         # so False = NOT-PROVEN-reachable, not "safe" — an unguarded (F,no) sink is still flagged, just
         # below a proven-reachable one). Honest, avoids ranking everything CRITICAL.
         tainted = bool(getattr(s, "tainted_reachable", False))
+        # A send is proven-guarded either interprocedurally (state == "yes") OR by a STRONG in-function
+        # guard proof (a resolved-import/gateway kill-switch dominating the sink — the visit boundary keys
+        # on the enclosing def line so it cannot itself see an in-function guard; guard_proof does). This
+        # combined "guarded" signal gates BOTH the fixed-dest demotion (BLOCKER 2 — a guarded send is never
+        # demoted to the amber band) and the later strong-proof downgrade.
+        _proof_id = s.guard_proof.get("guard_identity")
+        _proof_strong = (s.guard_proof.get("status") == "proven" and _proof_id in _CRITICAL_IDENTITY)
+        _guarded = (state == "yes") or _proof_strong
         # AI-SUSPECTED SURFACES ARE ADVISORY — NEVER a deterministic verdict (the honesty invariant).
         # A model GUESS (detection_source in {ai_suspected, ai_corroborated}, verdict AI_SUSPECTED_REVIEW)
         # must not run through the deterministic verdict machinery that writes UNGUARDED_CRITICAL_LIVE_SINK
@@ -331,7 +351,19 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
         #     constant/config provenance evidence as the other two channels.
         # (The harder constructed-destination cases are left RED for the adversarial verifier, which reads
         # the code.)
-        if s.capability in _FIXED_DEST_CAPS and not getattr(s, "tainted_destination", False):
+        # BLOCKER 2: a fixed-dest send lands in the AMBER review band iff it would OTHERWISE be RED — i.e.
+        # its CONTENT is tainted (tainted_reachable) AND no critical guard dominates it (state != "yes",
+        # unguarded). That AMBER condition is split across two honest gates so neither over-fires:
+        #   * GUARD gate (here): a KILL-SWITCH-GUARDED send (_guarded — state == "yes" OR a strong in-function
+        #     guard proof) is NOT demoted — it flows to the guarded/strong-proof path (rank 3/7, blue/gated),
+        #     exactly as on main. Only genuinely unguarded sends demote.
+        #   * TAINT gate (install_report.is_reachable_fixed_dest_review): only a tainted-content demoted send
+        #     drives the AMBER band. An UNTAINTED config-dest send is still demoted OUT of the hard-block
+        #     verdict (preserving the FP3 suppression — a benign config webhook is never a block) but, being
+        #     untainted, it is not counted into the fixed-dest AMBER band and so resolves BLUE, not amber.
+        # (A tainted DESTINATION already stays RED via the tainted_destination guard below.)
+        if (not _guarded
+                and s.capability in _FIXED_DEST_CAPS and not getattr(s, "tainted_destination", False)):
             _prov = getattr(s, "dest_provenance", "unknown")
             if _prov in ("constant", "config"):
                 s.severity_rank = 5
@@ -352,8 +384,7 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
         # identity — NOT a LOCAL_DEFINITION (marker re-verify: call_graph.prove credits a local decoy named
         # after a gate; trusting that here let a decoy downgrade a critical sink to rank 3). A resolved-
         # import/gateway cross-module proof still wins; a local-def proof does not for a critical sink.
-        _proof_id = s.guard_proof.get("guard_identity")
-        _proof_strong = (s.guard_proof.get("status") == "proven" and _proof_id in _CRITICAL_IDENTITY)
+        # (_proof_id / _proof_strong were computed once above, alongside the combined _guarded signal.)
         if state != "yes" and _proof_strong:
             s.severity_rank = 3 if tainted else 7
             counts["guarded_review"] += 1
@@ -372,6 +403,26 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
         if verdict is not None:
             s.verdict = verdict
             s.live_promotion_verdict = promo
+            # GAP-2 (Fable-5 artefact coherence): a reachable+unguarded AMBER-capability action
+            # (post/reply/like/comment/browser_click ...) correctly KEEPS the UNGUARDED_CRITICAL_LIVE_SINK
+            # verdict — that is the string install_report.is_reachable_amber_action keys on to drive the AMBER
+            # "reachable actions — review" band and guarantee the send is never dropped to BLUE. But an amber
+            # reversible/social action is a "review before you ship", NOT a hard live-promotion BLOCK: the
+            # patch plan (block_live_promotion=False), the dashboard block set (is_non_gated_vulnerable filters
+            # to _VULN_CAPS, which EXCLUDES the amber set) and every renderer already treat it as review. The
+            # RAW per-surface artefact (hermes_action_surface_scan.json) must AGREE on the LIVE-PROMOTION
+            # decision — otherwise it stamps live_promotion_verdict='BLOCK' on the SAME file:line that
+            # hermes_patch_plan.json calls block_live_promotion=false, the exact same-file:line cross-artefact
+            # contradiction this fix class targets, one layer lower. So stamp the amber surface's promotion
+            # verdict REVIEW. (severity_rank stays the guard-axis ordering key — 0 for reachable+unguarded is
+            # honest and is what the amber band's within-band ordering uses; risk_level stays the capability's
+            # inherent risk and is byte-identical across the two JSONs, so neither is a cross-artefact
+            # contradiction — only the promotion decision was.) SAFETY: this fires ONLY for _AMBER_ACTION_CAPS,
+            # never a RED _VULN_CAPS sink, so no real hard block is ever softened and the RED band /
+            # non_gated_vulnerable count (verdict + _VULN_CAPS) is untouched.
+            from . import install_report as _IR
+            if s.capability in _IR._AMBER_ACTION_CAPS:
+                s.live_promotion_verdict = "REVIEW"
             if state == "no" and tainted:
                 counts["unguarded_critical"] += 1
             elif state == "no":

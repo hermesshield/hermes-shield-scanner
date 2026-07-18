@@ -135,6 +135,12 @@ def render_results(report: dict, scan: dict, out_dir, version: str, colour: bool
     cov = report.get("coverage_pct", "")
     reach = report.get("non_gated_vulnerable", 0)
     il = report.get("install_liability_rce", 0)
+    # reachable AMBER band: reversible/social actions + fixed-destination sends demoted on proven config/
+    # constant destination. These are reachable + unguarded (never BLUE); the HTML report bands the repo
+    # AMBER on them, so the default TTY panel must surface them too — otherwise an amber-only repo reads
+    # "0 reachable" in the terminal while the report says AMBER.
+    amber_actions = report.get("reachable_amber_actions", 0)
+    fixed_dest = report.get("reachable_fixed_dest_review", 0)
     band = (report.get("install_liability_rating") or {}).get("band", "")
     rating = report.get("overall_rating", "")
     target = os.path.basename(str(report.get("root", "")) or scan.get("root", "")) or "target"
@@ -178,6 +184,12 @@ def render_results(report: dict, scan: dict, out_dir, version: str, colour: bool
     if dep_il:
         L.append("      " + c(_A, "● ") + c(_GRY, "Inherited via deps".ljust(20)) +
                  c(_DIM, "pinned pkgs".ljust(14)) + c(_A + _B, f"{dep_il}"))
+    if amber_actions:
+        L.append("      " + c(_A, "● ") + c(_GRY, "Reachable actions".ljust(20)) +
+                 c(_DIM, "review".ljust(14)) + c(_A + _B, f"{amber_actions}"))
+    if fixed_dest:
+        L.append("      " + c(_A, "● ") + c(_GRY, "Fixed-dest sends".ljust(20)) +
+                 c(_DIM, "review".ljust(14)) + c(_A + _B, f"{fixed_dest}"))
     L.append("")
     # Display-map "None (no proven-live)" -> "No proven-live exploit path" (AMBER/neutral, NOT green —
     # green reads "all-clear"). Cosmetic mapping only: the raw overall_rating string in the audit artefacts
@@ -190,6 +202,10 @@ def render_results(report: dict, scan: dict, out_dir, version: str, colour: bool
     # Zero-state: a clean-looking scan still says what it FOUND — never "found nothing".
     if reach == 0 and il > 0:
         L.append("      " + c(_A, f"→ {il} RCE-class surfaces need gating before install — see the report"))
+    elif reach == 0 and (amber_actions or fixed_dest):
+        _n = amber_actions + fixed_dest
+        L.append("      " + c(_A, f"→ {_n} reachable action{'s' if _n != 1 else ''} — "
+                                   f"review before you ship (see the report)"))
     elif reach == 0:
         L.append("      " + c(_GRY, f"→ {surfaces} action-surfaces mapped — full map in the report"))
     # AI tier health: a broken agent backend is SHOWN, never silent (the deterministic scan is unaffected).

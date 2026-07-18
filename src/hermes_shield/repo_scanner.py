@@ -218,25 +218,53 @@ def scan_file(path: Path, root: Path):
             for group in (proven, unproven):
                 if not group:
                     continue
-                chosen = group[0]
-                # DISPLAY symbol stays the BARE enclosing name (scope path is a grouping key only), so the
-                # customer-facing `symbol` field is unchanged.
-                sym = chosen["enclosing_symbol"]
-                surf = _make(chosen["line"], cap, chosen["mutating"], sym,
-                             chosen["call_expr"], chosen["sink_kind"], chosen["module_scope"])
-                surf.dest_provenance = chosen.get("dest_provenance", "unknown")   # FP3
-                if surf.sink_line in dest_info:                                    # Fix1: dataflow refinement
-                    _prov, _tdest = dest_info[surf.sink_line]
-                    surf.dest_provenance = _prov
-                    surf.tainted_destination = _tdest
-                surf.auth_gated = chosen.get("auth_gated", False)                 # FP4
-                surf.shell_form = chosen.get("shell_form", True)                  # S8.46
-                if cap == "code_exec" and chosen["line"] in llm_eval_lines:        # S8.72 eval-on-LLM-output class
-                    surf.guard_proof["llm_output_eval"] = llm_eval_lines[chosen["line"]]
-                surf.guard_proof.setdefault("sibling_sink_lines", [g["line"] for g in group[1:]])
-                if proven and unproven:
-                    surf.guard_proof["dedup_group"] = f"{sym}:{cap}"
-                surfaces.append(surf)
+                # BLOCKER-1 (Fable-5 adversarial re-run): the proof-status split alone is NOT enough to keep
+                # the P2.9E-REVIEW promise ("an UNGUARDED live-action sink is never hidden by a guarded
+                # sibling"). A one-hop-GUARDED wrapper CALL-SITE (`send_draft(...)`) and an unguarded DIRECT
+                # sink of the same capability (`service...send(...)`) both return fg.prove()=="unproven", so
+                # they land in the SAME bucket; surfacing only group[0] (the textually-first = the guarded
+                # wrapper) folded the genuinely-unguarded direct sink into sibling_sink_lines, where it never
+                # got its own guard verdict — and guard_attribution's one-hop credit then marked the surviving
+                # wrapper surface "yes" -> BLUE, silencing a real reachable+tainted exfil (`guarded(); send()`
+                # on one physical line collapsed the whole repo to BLUE).
+                #
+                # FIX (keys the de-hiding split on the GUARD/ATTRIBUTION axis, per the review): partition each
+                # proof-status bucket by whether the sink is ONE-HOP-GUARDABLE — a bare-name call whose target
+                # has no "." — versus a DIRECT dotted/method sink. This mirrors guard_attribution._one_hop_guarded
+                # EXACTLY: the one-hop guard credit is only ever applied to a bare-name sink (a dotted/method sink
+                # carries "." so it can NEVER be one-hop credited). A direct sink therefore CANNOT be over-credited
+                # by a guarded wrapper, so it must keep its OWN representative and can never be dropped in favour of
+                # a guardable (potentially one-hop-guarded) sibling. Same-axis siblings still collapse (intentional
+                # noise control — a nested guarded-wrapper arg on the sink line, or a duplicate call, stays folded).
+                # The textually-first sink of each partition is the representative: within one function an
+                # in-function guard can only dominate LATER lines, so the earliest occurrence is the least-guarded
+                # (most severe) — picking it never over-credits.
+                def _guardable(sk):
+                    ce = (sk.get("call_expr", "") or "").strip()
+                    return bool(ce) and "." not in ce
+                by_axis = defaultdict(list)
+                for sk in group:
+                    by_axis[_guardable(sk)].append(sk)
+                for target_group in by_axis.values():
+                    chosen = target_group[0]
+                    # DISPLAY symbol stays the BARE enclosing name (scope path is a grouping key only), so the
+                    # customer-facing `symbol` field is unchanged.
+                    sym = chosen["enclosing_symbol"]
+                    surf = _make(chosen["line"], cap, chosen["mutating"], sym,
+                                 chosen["call_expr"], chosen["sink_kind"], chosen["module_scope"])
+                    surf.dest_provenance = chosen.get("dest_provenance", "unknown")   # FP3
+                    if surf.sink_line in dest_info:                                    # Fix1: dataflow refinement
+                        _prov, _tdest = dest_info[surf.sink_line]
+                        surf.dest_provenance = _prov
+                        surf.tainted_destination = _tdest
+                    surf.auth_gated = chosen.get("auth_gated", False)                 # FP4
+                    surf.shell_form = chosen.get("shell_form", True)                  # S8.46
+                    if cap == "code_exec" and chosen["line"] in llm_eval_lines:        # S8.72 eval-on-LLM-output class
+                        surf.guard_proof["llm_output_eval"] = llm_eval_lines[chosen["line"]]
+                    surf.guard_proof.setdefault("sibling_sink_lines", [g["line"] for g in target_group[1:]])
+                    if proven and unproven:
+                        surf.guard_proof["dedup_group"] = f"{sym}:{cap}"
+                    surfaces.append(surf)
     else:
         # regex fallback ONLY when the file does not parse — labelled weak, never full-path.
         for i, line in enumerate(lines, 1):

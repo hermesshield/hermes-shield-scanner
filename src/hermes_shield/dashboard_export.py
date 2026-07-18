@@ -2,6 +2,8 @@
 from __future__ import annotations
 from collections import Counter
 
+from . import install_report as _IR
+
 
 def build(scan: dict, drift_overall: str, drift_findings, patch_items, baseline_status: str, scan_time: str):
     surfaces = scan["surfaces"]
@@ -11,7 +13,12 @@ def build(scan: dict, drift_overall: str, drift_findings, patch_items, baseline_
     static = [s for s in surfaces if getattr(s, "detection_source", "static") == "static"]
     verdicts = Counter(s.verdict for s in static)
     scopes = Counter(s.scope for s in static)
-    block = [s for s in static if s.verdict in ("BLOCK_LIVE_PROMOTION", "GUARD_LOST", "UNGUARDED_CRITICAL_LIVE_SINK")]
+    # BLOCK-COUNTER RECONCILIATION: the block set must agree with patch_plan.build — an amber-capability
+    # UNGUARDED_CRITICAL_LIVE_SINK (post/reply/like/comment ...) is a "reachable action — review", NOT a
+    # hard block. patch_plan already excludes it (block = hard-verdict OR is_non_gated_vulnerable, which
+    # filters to _VULN_CAPS). Match that partition here so every consumer counts the same surfaces.
+    block = [s for s in static
+             if s.verdict in ("BLOCK_LIVE_PROMOTION", "GUARD_LOST") or _IR.is_non_gated_vulnerable(s)]
     overall = "BLOCK_LIVE_PROMOTION" if block else ("DRIFT_DETECTED" if drift_overall == "DRIFT_DETECTED" else "PASS_WITH_RESIDUAL_RISK")
     return {
         "overall_verdict": overall,

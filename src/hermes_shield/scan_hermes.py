@@ -378,7 +378,12 @@ def main(argv=None):
     # (the writer-side reset already keeps AI surfaces at AI_SUSPECTED_REVIEW; this is defence-in-depth).
     _static_prod = [s for s in prod if getattr(s, "detection_source", "static") == "static"]
     verdicts = Counter(s.verdict for s in _static_prod)
-    block = [s for s in _static_prod if s.verdict in ("BLOCK_LIVE_PROMOTION", "GUARD_LOST", "UNGUARDED_CRITICAL_LIVE_SINK")]
+    # BLOCK-COUNTER RECONCILIATION: agree with patch_plan.build + dashboard_export — an amber-capability
+    # UNGUARDED_CRITICAL_LIVE_SINK (post/reply/like ...) is a reachable-action REVIEW, not a hard block.
+    # is_non_gated_vulnerable is the shared predicate (static + prod + cap ∈ _VULN_CAPS + verdict).
+    from . import install_report as _IR
+    block = [s for s in _static_prod
+             if s.verdict in ("BLOCK_LIVE_PROMOTION", "GUARD_LOST") or _IR.is_non_gated_vulnerable(s)]
 
     overall_drift, drift_findings = "NO_DRIFT", []
     baseline_status = "absent"

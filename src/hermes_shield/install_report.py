@@ -90,9 +90,15 @@ def is_reachable_fixed_dest_review(s) -> bool:
     Same static+prod honesty gate as the other two predicates — an AI-suspected model GUESS
     (detection_source != "static") can NEVER drive amber, exactly as it can never drive red. The verdict
     string CONFIG_DESTINATION_WRITE_REVIEW is only ever written by the fixed-destination demotion, so
-    keying on it is sufficient and cannot collide with the RED / social-amber partitions."""
+    keying on it is sufficient and cannot collide with the RED / social-amber partitions.
+
+    BLOCKER 2 (defence-in-depth): the demotion in guard_attribution now only writes this verdict for a send
+    that would OTHERWISE be RED (tainted CONTENT, unguarded). We re-assert the content-taint condition here
+    so an untainted / guarded send can never surface in the AMBER fixed-dest band even if some other path
+    were ever to stamp the verdict — an untainted fixed-dest send resolves BLUE, exactly as on main."""
     return (getattr(s, "context", "prod") == "prod"
             and getattr(s, "detection_source", "static") == "static"
+            and getattr(s, "tainted_reachable", False)
             and getattr(s, "verdict", "") == "CONFIG_DESTINATION_WRITE_REVIEW")
 
 
