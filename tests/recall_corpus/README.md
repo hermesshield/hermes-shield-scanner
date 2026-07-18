@@ -45,20 +45,44 @@ Measured with `score.py scan_out_static`, scanner v0.8.0.
 
 | Corpus | Planted | Recall | Decoys | Precision |
 |---|---|---|---|---|
-| Original (numbers of record) | 20 | **50.0%** (10/20) | 7 | **7/7 clean** (0 FP) |
-| **Extended (current)** | **21** | **47.6%** (10/21) | **9** | **8/9 clean** (1 FP) |
+| Pre-DET-RECALL baseline | 21 | **47.6%** (10/21) | 9 | **8/9 clean** (1 FP) |
+| **Current (DET-RECALL alias/binding tracking)** | **21** | **85.7%** (18/21) | **9** | **8/9 clean** (1 FP) |
 
-- Static catches the 10 literal / import-alias / immediate-getattr-call sinks
-  and **never regresses** on them.
-- The 11 static-missed sinks are the indirections the finder exists to close:
-  builtin aliasing, getattr-assigned dynamic dispatch, generic-verb libraries,
-  and the new aliased **exfil** sink.
-- The single static false positive is the new **reachable-but-sanitised** decoy
+**Honest number of record: 18/21 = 85.7%.** Every one of the 18 catches lands
+on the exact planted sink line (distance 0). This is NOT 95.2% (20/21): that
+figure is a scoring artefact from an earlier ±3-line locality tolerance that let
+two still-missed sinks (`tools.py:20`, `senders.py:18`) bleed onto a neighbouring
+surface's function span. `score.py` now anchors on the true sink line only and
+credits each detected surface to at most one planted row, so the reported number
+equals the sinks the scanner actually located.
+
+- The DET-RECALL pass added 8 new deterministic catches over the pre-change
+  baseline — builtin aliasing (`_calc = eval`), dotted-sink aliasing
+  (`_run = subprocess.getoutput`, `_ship = requests.post`), attribute-ref
+  aliasing (`_sender = api.send_direct_message`), getattr-assigned dynamic
+  dispatch on a known-dangerous receiver, and library-aware self-attr calls
+  (`self.sg.send`). It **never regresses** on the 10 literal / import-alias /
+  immediate-getattr-call sinks static already caught.
+- **3 residual misses (the honest gap the finder must still close):**
+  1. `agent_tool_runner/tools.py:20` — `_ex(code)` where `_ex` is `exec`
+     **re-exported from another module** (`from _aliases import _ex`). This is a
+     *cross-file-deterministic-pending* case: the single-file AST engine cannot
+     see the binding, but it is resolvable deterministically with cross-module
+     alias resolution (the repo already ships `cross_module.py` / `module_index.py`).
+     It is a scope limit of the current engine, **not** an intrinsically AI-only case.
+  2. `dm_bot/senders.py:18` — `client.send_message(...)` (telethon) on a
+     locally-passed, unresolved `client`. A generic verb on an unresolved
+     receiver; firing on it deterministically would over-fire on benign
+     receiver dispatch (SQS-style `send_message`). Genuinely AI-needed.
+  3. `plugin_loader/loader.py:19` — `getattr(mod, hook_name)` on a bare
+     function parameter `mod`. Not provably dangerous within the file; flagging
+     the shape alone over-fires. Genuinely AI-needed.
+- The single static false positive is the **reachable-but-sanitised** decoy
   (`webhook_ops/sanitised.py:21`): static flags an allowlisted subprocess call
   as `UNGUARDED_CRITICAL_LIVE_SINK` because it does not track the upstream
   allowlist. This is a *deliberate, honest* FP — it is the false-positive
-  discipline case the finder must de-escalate. The original 7 decoys remain
-  0-FP under static.
+  discipline case the finder must de-escalate. Every benign IGNORE decoy
+  (including D08 `tools.py:60`, the getattr-on-benign-receiver shape) stays 0-FP.
 
 ## Hard cases added (from the Fable-5 corpus review)
 

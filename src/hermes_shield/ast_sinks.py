@@ -315,7 +315,162 @@ def _resolve_dotted(func, sym_alias, mod_alias):
     return None
 
 
-def _classify_call(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None):
+# ---- DET-RECALL (alias/binding tracking of KNOWN dangerous callables) ------------------------------
+# S9 RECALL: a dangerous primitive that is *bound to a local/module name* and then invoked through that
+# name has no literal sink token at the call site. These three collectors resolve the binding back to a
+# KNOWN sink so the call is flagged deterministically. CONSERVATIVE by construction: we only promote a
+# binding when the bound value is *provably* a known-dangerous callable (a builtin exec/eval; a dotted
+# sink already in the vocabulary; a getattr on a KNOWN-dangerous receiver os/subprocess/danger-lib). A
+# generic name bound to an unknown/benign callable (e.g. getattr(_TEXT, verb) in the D08 decoy) is left
+# untouched — resolving *that* target is the AI finder's job and flagging the shape alone would over-fire.
+_BUILTIN_CODE_SINKS = {"exec", "eval", "compile", "__import__"}
+_DANGER_GETATTR_MODULES = {"os", "subprocess", "builtins"}
+
+
+def _alias_rhs_sink(v, sym_alias, mod_alias):
+    """If assignment RHS `v` is PROVABLY a known dangerous callable, return (cap, mut); else None.
+    Handles: builtin code-exec Name (exec/eval); a dotted attribute-ref that resolves to a known dotted
+    sink (subprocess.getoutput / requests.post / pickle.loads); a bare attribute-ref whose method name is
+    a distinctive KNOWN name-sink (api.send_direct_message)."""
+    # `_calc = eval`  /  `_ex = exec`
+    if isinstance(v, ast.Name):
+        if v.id in _BUILTIN_CODE_SINKS:
+            return ("code_exec", True)
+        # `x = <existing import-alias of a sink>` handled elsewhere; keep this branch builtin-only.
+        return None
+    # `_run = subprocess.getoutput`  /  `_ship = requests.post`  /  `_sender = api.send_direct_message`
+    if isinstance(v, ast.Attribute):
+        rd = _resolve_dotted(v, sym_alias, mod_alias)
+        d = _dotted(v)
+        for cand in (rd, d):
+            if not cand:
+                continue
+            if cand in _DOTTED_SINKS:
+                return _DOTTED_SINKS[cand]
+            if cand in _DESERIALIZE:
+                return ("deserialize", True)
+            root, _, tail = cand.rpartition(".")
+            fam = root.split(".")[0]
+            if fam in _SUBPROC_FAMILY and tail in _SUBPROC_FAMILY[fam]:
+                return ("subprocess_exec", True)
+        # bare distinctive method-reference: `_sender = api.send_direct_message`
+        if v.attr in _NAME_SINKS:
+            return _NAME_SINKS[v.attr]
+    return None
+
+
+def _name_assigns(nodes):
+    """(name, value_node) for every single-Name-target assignment in an iterable of AST nodes."""
+    for n in nodes:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            yield n.targets[0].id, n.value
+
+
+def _iter_scopes(tree):
+    """Yield (scope_key, assigns) for the module and for every function — SCOPE-LOCAL so a local name in
+    one function never leaks its binding to a sibling (the D08 decoy's benign `fn` must not poison the RED
+    `fn` in raw_tool). scope_key is None for the module, else the FunctionDef node (identity-keyed)."""
+    yield None, list(_name_assigns(tree.body))          # module top-level only (not function bodies)
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield fn, list(_name_assigns(ast.walk(fn)))
+
+
+def _collect_call_aliases(tree, sym_alias, mod_alias):
+    """Return (module_map, func_map): name -> (cap, mut) for names PROVABLY bound to a known dangerous
+    callable, computed PER SCOPE. Ambiguity-guarded WITHIN a scope: a name also assigned a non-qualifying
+    value in the SAME scope is dropped (precision)."""
+    def scope_map(assigns):
+        qualified, ambiguous = {}, set()
+        for name, v in assigns:
+            capmut = _alias_rhs_sink(v, sym_alias, mod_alias)
+            if capmut is not None:
+                qualified[name] = capmut
+            else:
+                ambiguous.add(name)
+        return {k: v for k, v in qualified.items() if k not in ambiguous}
+    module_map, func_map = {}, {}
+    for key, assigns in _iter_scopes(tree):
+        m = scope_map(assigns)
+        if key is None:
+            module_map = m
+        elif m:
+            func_map[key] = m
+    return module_map, func_map
+
+
+def _collect_self_danger_attrs(tree, sym_alias, mod_alias, inst_map):
+    """attr -> danger-lib key for `self.<attr> = <danger-lib module/instance>` (e.g. self.sg = sendgrid...,
+    self.client = stripe). Lets a generic-verb call on a RESOLVED danger-lib attribute receiver
+    (self.sg.send(...)) fire via the library-aware path."""
+    out = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Attribute):
+            tgt = n.targets[0]
+            if not (isinstance(tgt.value, ast.Name) and tgt.value.id == "self"):
+                continue
+            root = _chain_root(n.value)
+            if not root:
+                continue
+            key = _danger_lib_key(root, mod_alias, inst_map)
+            if not key and root in sym_alias:
+                fam = sym_alias[root].split(".")[0]
+                if fam in _DANGER_LIBS:
+                    key = fam
+            if key:
+                out[tgt.attr] = key
+    return out
+
+
+def _getattr_recv_danger(recv, mod_alias, inst_map, self_attrs, danger_vars):
+    """Is the FIRST arg of a getattr() a PROVABLY known-dangerous receiver? (os/subprocess/builtins, a
+    danger-lib name or instance, a self.<attr> resolved to a danger-lib, or a var already proven dangerous)."""
+    if isinstance(recv, ast.Name):
+        n = recv.id
+        if n in _DANGER_GETATTR_MODULES or mod_alias.get(n) in _DANGER_GETATTR_MODULES:
+            return True
+        if _danger_lib_key(n, mod_alias, inst_map):
+            return True
+        return n in inst_map or n in danger_vars
+    if isinstance(recv, ast.Attribute):
+        return isinstance(recv.value, ast.Name) and recv.value.id == "self" and recv.attr in self_attrs
+    return False
+
+
+def _collect_danger_dispatch_vars(tree, mod_alias, inst_map, self_attrs):
+    """Return (module_danger, func_danger): names bound to `getattr(<known-dangerous receiver>, ...)` — an
+    attacker/config-selected attribute of a dangerous module/object, invoked through the local. Computed
+    PER SCOPE (so the D08 decoy's `fn = getattr(_TEXT, verb)` never poisons raw_tool's RED `fn`). Fixpoint
+    resolves the getattr chain within a scope (resource = getattr(self.client, action); creator =
+    getattr(resource, 'create'); creator(...))."""
+    def scope_vars(assigns):
+        danger, ambiguous = set(), set()
+        for _ in range(4):
+            changed = False
+            for name, v in assigns:
+                is_getattr = (isinstance(v, ast.Call) and isinstance(v.func, ast.Name)
+                              and v.func.id == "getattr" and v.args)
+                if is_getattr and _getattr_recv_danger(v.args[0], mod_alias, inst_map, self_attrs, danger):
+                    if name not in danger:
+                        danger.add(name)
+                        changed = True
+                else:
+                    ambiguous.add(name)
+            if not changed:
+                break
+        return danger - ambiguous
+    module_danger, func_danger = set(), {}
+    for key, assigns in _iter_scopes(tree):
+        d = scope_vars(assigns)
+        if key is None:
+            module_danger = d
+        elif d:
+            func_danger[key] = d
+    return module_danger, func_danger
+
+
+def _classify_call(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None,
+                   alias_sinks=None, danger_vars=None, self_attrs=None):
     """Return (capability, mutating, sink_kind, static_artifact_type) or None if not a sink."""
     func = node.func
     bare = _attr_name(func)
@@ -335,6 +490,18 @@ def _classify_call(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None
             return cap, mut, "ast_call", None
         # let a resolved 'subprocess.run'/'requests.post' flow through the normal branches too:
         dotted = dotted or rdotted
+
+    # S9 DET-RECALL: a call through a local/module name PROVABLY bound to a known dangerous callable
+    # (`_calc = eval; _calc(expr)`, `_run = subprocess.getoutput; _run(cmd)`, `_ship = requests.post`,
+    # `_sender = api.send_direct_message`). No literal sink token at the call site; resolved via binding.
+    if isinstance(func, ast.Name) and (alias_sinks or {}).get(func.id):
+        cap, mut = alias_sinks[func.id]
+        return cap, mut, "ast_alias_call", None
+    # S9 DET-RECALL: a call through a local bound to `getattr(<known-dangerous receiver>, <attr>)` —
+    # attacker/config-selected attribute of os/subprocess/a danger-lib (`fn = getattr(os, verb); fn(x)`,
+    # `creator = getattr(resource, 'create'); creator(...)`). Undecidable which verb -> honest dynamic_dispatch.
+    if isinstance(func, ast.Name) and func.id in (danger_vars or set()):
+        return "dynamic_dispatch", True, "ast_dynamic_dispatch", "DYNAMIC_DISPATCH"
 
     # model/vision: responses.create / chat.completions.create -> vision if an arg mentions an image
     if bare == "create" and ("responses" in chain or "completions" in chain or "messages" == chain.split(".")[0]):
@@ -434,6 +601,12 @@ def _classify_call(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None
     # import-gating is a follow-up.)
     _root = chain.split(".")[0] if chain else ""
     _lib = _danger_lib_key(_root, mod_alias or {}, inst_map or {})   # resolves via import + INSTANCE map
+    # S9 DET-RECALL: resolve a `self.<attr>` receiver assigned a danger-lib (self.sg = sendgrid...) so a
+    # generic-verb call on it (self.sg.send(msg)) fires — the receiver is PROVEN, not merely unresolved.
+    if not _lib and self_attrs and chain.startswith("self."):
+        _parts = chain.split(".")
+        if len(_parts) >= 3 and _parts[1] in self_attrs:
+            _lib = self_attrs[_parts[1]]
     # skip reads (get/list/...), named constructors, AND Capitalised methods (redis.Redis()/SSHClient()
     # /Connection() are CLIENT CONSTRUCTORS, not actions) + common factory names.
     _guard_ok = bool(bare and not bare.startswith(_LIB_READ_PREFIX) and bare not in _LIB_CTOR
@@ -802,13 +975,21 @@ def analyse_destinations(tree, dest_caps: dict, cli_main: bool = False) -> dict:
 
 
 class _Visitor(ast.NodeVisitor):
-    def __init__(self, sym_alias=None, mod_alias=None, inst_map=None):
+    def __init__(self, sym_alias=None, mod_alias=None, inst_map=None,
+                 module_alias=None, func_alias=None, module_danger=None, func_danger=None, self_attrs=None):
         self.stack: List[str] = []       # enclosing symbols
         self.auth_stack: List[bool] = []  # FP4: enclosing auth-gated routes
         self.sinks: List[dict] = []
         self.sym_alias = sym_alias or {}
         self.mod_alias = mod_alias or {}
         self.inst_map = inst_map or {}
+        self.self_attrs = self_attrs or {}
+        # S9 DET-RECALL: scope-local binding maps. The stack top is the effective (module + enclosing
+        # functions) map at the current point; entering a function merges its locals, leaving pops them.
+        self._func_alias = func_alias or {}
+        self._func_danger = func_danger or {}
+        self._alias_stack = [dict(module_alias or {})]
+        self._danger_stack = [set(module_danger or set())]
 
     def _visit_scope(self, node, name):
         self.stack.append(name)
@@ -831,7 +1012,12 @@ class _Visitor(ast.NodeVisitor):
                 "module_scope": not self.stack, "call_expr": f"route:{node.name}"})
         self.auth_stack.append(_is_auth_gated_route(node))
         self.stack.append(node.name)
+        # S9 DET-RECALL: merge this function's scope-local alias/danger bindings onto the stack.
+        self._alias_stack.append({**self._alias_stack[-1], **self._func_alias.get(node, {})})
+        self._danger_stack.append(self._danger_stack[-1] | self._func_danger.get(node, set()))
         self.generic_visit(node)
+        self._danger_stack.pop()
+        self._alias_stack.pop()
         self.stack.pop()
         self.auth_stack.pop()
 
@@ -841,7 +1027,8 @@ class _Visitor(ast.NodeVisitor):
         self._visit_scope(node, node.name)
 
     def visit_Call(self, node):
-        res = _classify_call(node, self.sym_alias, self.mod_alias, self.inst_map)
+        res = _classify_call(node, self.sym_alias, self.mod_alias, self.inst_map,
+                             self._alias_stack[-1], self._danger_stack[-1], self.self_attrs)
         if res:
             cap, mut, kind, artifact = res
             self.sinks.append({
@@ -905,7 +1092,12 @@ def detect(text: str):
         return False, []
     sym_alias, mod_alias = _collect_aliases(tree)
     inst_map = _collect_instances(tree, sym_alias, mod_alias)
-    v = _Visitor(sym_alias, mod_alias, inst_map)
+    # S9 DET-RECALL binding/alias tracking of KNOWN dangerous callables (conservative, scope-local — see collectors).
+    self_attrs = _collect_self_danger_attrs(tree, sym_alias, mod_alias, inst_map)
+    module_alias, func_alias = _collect_call_aliases(tree, sym_alias, mod_alias)
+    module_danger, func_danger = _collect_danger_dispatch_vars(tree, mod_alias, inst_map, self_attrs)
+    v = _Visitor(sym_alias, mod_alias, inst_map, module_alias, func_alias,
+                 module_danger, func_danger, self_attrs)
     v.visit(tree)
     dead = _dead_line_ranges(tree)
     if dead:
