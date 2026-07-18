@@ -208,6 +208,28 @@ def scan_file(path: Path, root: Path):
             if scope is None:
                 scope = sk["enclosing_symbol"]
             groups[(scope, cap)].append(sk)
+
+        def _sink_severity(sk):
+            # ROOT FIX (Fable-5 taint + destination axes) — danger ranking used to pick the dedup
+            # representative. It mirrors EXACTLY the signals guard_attribution reads to band a surface:
+            #   * tainted CONTENT (tainted_reachable, via taint_edges) is the RED driver (the quadrant
+            #     (True,"no") -> UNGUARDED_CRITICAL_LIVE_SINK);
+            #   * an attacker-controlled / UNKNOWN destination stays RED, while a PROVEN constant/config
+            #     destination is the ONLY thing demoted to the AMBER fixed-dest review band.
+            # Guard is already homogeneous within a partition (the proof-status split + the guardable-axis
+            # split above), so taint and destination are the two remaining severity axes. Higher tuple ==
+            # more severe; equal tuples fall back to source order (max keeps the FIRST maximal member), so
+            # an all-benign / untainted / constant-dest partition is byte-identical to the old first-wins
+            # behaviour — no over-fire, surface counts unchanged.
+            line = sk["line"]
+            tainted = 1 if line in taint_edges else 0
+            if line in dest_info:
+                _prov, _tdest = dest_info[line]
+            else:
+                _prov, _tdest = sk.get("dest_provenance", "unknown"), False
+            prov_rank = {"unknown": 2, "config": 1, "constant": 0}.get(_prov, 2)
+            return (tainted, 1 if _tdest else 0, prov_rank)
+
         for (scope, cap), sks in groups.items():
             # P2.9E-REVIEW: a function may have several sinks of one capability. Surface a
             # representative for EACH proof-status so an UNGUARDED live-action sink is never hidden by
@@ -251,9 +273,33 @@ def scan_file(path: Path, root: Path):
                     # guardable partition on the distinct call name; dotted/direct sinks (never one-hop
                     # credited) still share one representative.
                     g = _guardable(sk)
-                    by_axis[(g, (sk.get("call_expr", "") or "").strip() if g else "")].append(sk)
+                    # BLOCKER (Fable-5 shell_form axis): shell_form is a VERDICT-DETERMINING axis for
+                    # subprocess_exec — guard_attribution downgrades a NON-shell subprocess (subprocess.run([list]),
+                    # shell_form=False) to the AMBER SUBPROCESS_NON_SHELL_REVIEW band, while a SHELL subprocess
+                    # (os.system / shell=True, shell_form=True) with a tainted arg is RED command injection
+                    # (UNGUARDED_CRITICAL_LIVE_SINK). Both are capability=subprocess_exec and both dotted, so
+                    # without this key they collapse into one guardable-axis partition; when the non-shell sibling
+                    # sorts first, worst-member selection ties them on the taint/dest tuple (dest axes are
+                    # homogeneous for a non-dest-aware RCE cap) and the textually-first AMBER hid the RED shell
+                    # injection — an order-dependent BLUE/AMBER collapse. Partition on shell_form so each form
+                    # keeps its OWN representative and its OWN verdict, exactly like the guardable/proof-status
+                    # splits. Non-subprocess caps carry shell_form=True uniformly (ast_sinks), so this never
+                    # splits a non-subprocess group — no over-report, benign groups unchanged.
+                    by_axis[(g, (sk.get("call_expr", "") or "").strip() if g else "",
+                             bool(sk.get("shell_form", True)))].append(sk)
                 for target_group in by_axis.values():
-                    chosen = target_group[0]
+                    # ROOT FIX (Fable-5): the representative is the WORST/most-severe member of the
+                    # partition, NEVER merely target_group[0] (textually first). The old first-wins choice let
+                    # a benign sibling that happened to appear first — untainted, or a constant/config
+                    # destination — become the sole surface and DISCARD the taint / tainted_destination /
+                    # dest_provenance signals of a genuinely reachable-unguarded-tainted exfil sink of the SAME
+                    # (scope, cap, proof-status, guard-axis) partition, collapsing the verdict to BLUE/AMBER
+                    # (the taint axis: untainted send first hides tainted exfil; the destination axis:
+                    # constant-dest first hides attacker-dest exfil). Picking the worst member closes the whole
+                    # family without adding another partition key; the guardable/proof-status splits above keep
+                    # the guard axis closed (975a425). max() is a tie-stable de-hider: an all-benign partition
+                    # keeps its first member, so counts never balloon and benign groups never gain a false RED.
+                    chosen = max(target_group, key=_sink_severity)
                     # DISPLAY symbol stays the BARE enclosing name (scope path is a grouping key only), so the
                     # customer-facing `symbol` field is unchanged.
                     sym = chosen["enclosing_symbol"]
@@ -268,7 +314,14 @@ def scan_file(path: Path, root: Path):
                     surf.shell_form = chosen.get("shell_form", True)                  # S8.46
                     if cap == "code_exec" and chosen["line"] in llm_eval_lines:        # S8.72 eval-on-LLM-output class
                         surf.guard_proof["llm_output_eval"] = llm_eval_lines[chosen["line"]]
-                    surf.guard_proof.setdefault("sibling_sink_lines", [g["line"] for g in target_group[1:]])
+                    # Fable-5 evidence-trail fix: siblings are every folded member EXCEPT the chosen
+                    # representative — NOT target_group[1:]. When max() picks a later (worst) member, the
+                    # representative is no longer target_group[0]; slicing [1:] would list the representative's
+                    # own line as its sibling and DROP the textually-first member's line from the evidence
+                    # trail. Filter by identity so the physical-sink line list is always exactly the other
+                    # folded sinks.
+                    surf.guard_proof.setdefault(
+                        "sibling_sink_lines", [g["line"] for g in target_group if g is not chosen])
                     if proven and unproven:
                         surf.guard_proof["dedup_group"] = f"{sym}:{cap}"
                     surfaces.append(surf)
