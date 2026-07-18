@@ -64,7 +64,7 @@ def test_cache_hit_still_replays_in_cache_only(monkeypatch):
     # pre-seed the cache with the EXACT key ai_tier computes for svc.py
     import hashlib, json
     txt = (root / "svc.py").read_text()
-    key = hashlib.sha256(f"{txt}|default|{ai_tier.PROMPT_VERSION}".encode()).hexdigest()
+    key = hashlib.sha256(f"{txt}|default|default|{ai_tier.PROMPT_VERSION}".encode()).hexdigest()
     cache_path.write_text(json.dumps({key: [
         {"line": 99, "call": "danger()", "capability": "code_exec", "why": "x", "confidence": 0.9}
     ]}))

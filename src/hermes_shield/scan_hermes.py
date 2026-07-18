@@ -226,11 +226,19 @@ def run_scan(root: Path, progress=None, out_dir=None):
     scan["ai_tier_counts"] = {}
     if os.getenv("HERMES_SHIELD_AI_TIER") == "1":
         try:
-            from . import ai_tier
+            from . import ai_tier, ai_backends
             budget = int(os.getenv("HERMES_SHIELD_AI_TIER_BUDGET", "120"))
             model = os.getenv("HERMES_SHIELD_AI_TIER_MODEL") or None
+            # Backend selection (shared AI backend layer, first slice): HERMES_SHIELD_AI_BACKEND picks the
+            # propose() transport. Unset => "claude" => ai_assist.claude_agent VERBATIM, i.e. byte-identical
+            # to today's default AI path. Redaction + size-cap run INSIDE analyze_source, so every backend
+            # threaded through this seam is protected for free.
+            backend_id = os.getenv("HERMES_SHIELD_AI_BACKEND") or "claude"
+            agent = ai_backends.get_backend(backend_id, model=model)
+            # backend_id is threaded into the AI cache key (ai_tier) so a cache warmed by one backend can
+            # never silently replay for another — cross-backend provenance stays isolated.
             scan["ai_tier_counts"] = ai_tier.apply(root, scan["surfaces"], budget=budget, model=model,
-                                                   cache_dir=out_dir)
+                                                   agent=agent, cache_dir=out_dir, backend_id=backend_id)
             # S8.83 GAP-2 CAPABILITY NORMALISATION: AI findings carry hyphen/free-text caps (tool-invoke,
             # code-execution, file-write...) that never match the engine's canonical underscore vocabulary
             # (PAT.CRITICAL_CAPS / install_report._RCE_CAPS|_ACT_CAPS), so a reachable AI surface could never

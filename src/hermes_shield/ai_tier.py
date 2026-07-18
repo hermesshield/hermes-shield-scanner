@@ -126,7 +126,7 @@ def _default_cache_dir(cache_dir):
 
 
 def apply(root: Path, surfaces, budget: int = 120, model=None, cache_path=None, agent=None,
-          cache_dir=None) -> dict:
+          cache_dir=None, backend_id=None) -> dict:
     # audit #1: the cache lives under an OPERATOR-owned directory (the scan output dir), never under the
     # untrusted target `root`. An explicit cache_path (tests/API) is honoured but still symlink-validated.
     if cache_path is not None:
@@ -149,10 +149,16 @@ def apply(root: Path, surfaces, budget: int = 120, model=None, cache_path=None, 
     # guarantees NO subprocess (so it cannot hang: the do_wait freeze on several repos) while cache HITS still
     # replay exactly. Byte-identical behaviour when the flag is off (the else-branch below is unchanged).
     cache_only = os.getenv("HERMES_SHIELD_AI_TIER_CACHE_ONLY") == "1"
+    # PROVENANCE: the cache key MUST include the backend id. Backends are now operator-selectable, so a cache
+    # warmed by one backend (e.g. claude) must NOT replay for another (e.g. ollama) — that would let a broken/
+    # absent backend report ai_status="ok" with ai_calls=0 (the silent-zero antipattern) and silently mix one
+    # backend's findings into another's run. Distinct backend => distinct key => real call or honest failure.
+    backend_key = (backend_id or "default").strip().lower()
     added = calls = corroborated = deduped = skipped_miss = 0
     ai_failure = None
     for rel, txt in targets:
-        key = hashlib.sha256(f"{txt}|{model or 'default'}|{PROMPT_VERSION}".encode()).hexdigest()
+        key = hashlib.sha256(
+            f"{txt}|{model or 'default'}|{backend_key}|{PROMPT_VERSION}".encode()).hexdigest()
         if key in cache:
             findings = cache[key]
         elif cache_only:

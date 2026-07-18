@@ -218,6 +218,11 @@ def main(argv=None):
         sp.add_argument("--ai", action="store_true",
                         help="enable the AI-assist tier (novel-sink recall booster; advisory, "
                              "non-deterministic, needs the `claude` CLI; OFF by default)")
+        sp.add_argument("--ai-backend", dest="ai_backend", choices=("claude", "ollama"), default=None,
+                        help="AI-assist backend transport (default: claude, the historical path). "
+                             "'ollama' runs a LOCAL, zero-egress model via localhost Ollama "
+                             "(HERMES_SHIELD_OLLAMA_HOST / HERMES_SHIELD_OLLAMA_MODEL). Only meaningful "
+                             "with --ai; absent => claude (byte-identical to today).")
         sp.add_argument("--semgrep", action="store_true",
                         help="enable the semgrep comparator tier (multi-language breadth; "
                              "deterministic; needs `semgrep` installed)")
@@ -303,6 +308,11 @@ def main(argv=None):
             print("hermes-shield: --ai not available — the `claude` CLI is not installed/on PATH. "
                   "Install Claude Code (https://claude.com/claude-code) and authenticate, then retry. "
                   "Continuing with the deterministic core scan.", file=sys.stderr)
+    # --ai-backend is additive: it only selects the transport for the AI tier. Absent => the env stays
+    # unset => the tier defaults to "claude" (byte-identical to today). Set only when explicitly chosen so
+    # a plain --ai run is unchanged.
+    if getattr(args, "ai_backend", None):
+        os.environ["HERMES_SHIELD_AI_BACKEND"] = args.ai_backend
     if args.semgrep:
         if _tool_available("semgrep"):
             os.environ["HERMES_SHIELD_SEMGREP"] = "1"
