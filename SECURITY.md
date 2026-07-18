@@ -38,11 +38,10 @@ disruption, and give us reasonable time to remediate before public disclosure.
 
 ## Our own assurance
 
-The scanner has been independently security-assessed twice by an independent security reviewer (latest
-assessment, of v0.3.7: 0 critical / 0 high). Findings and remediation are recorded in `CHANGELOG.md`; core
-changes since the assessed build are itemised there too. See `FOR_AUDITORS.md` for scope and reproduction
-details.
-<!-- PROPOSED (pending Harley/Bill sign-off): kept "independent security reviewer" (an individual), not
-"third-party security firm" — per the deck's own honesty rule (never imply a firm/Halborn engagement until
-one publishes). Revert to "firm" only once a formal firm audit is published. -->
+The scanner has been independently security-assessed twice by an independent security reviewer. The first
+pass (v0.1.0) raised **2 High + 1 Medium**, all remediated in v0.3.7 and locked in with the reviewer's own
+regression tests; the re-assessment of that fixed build (v0.3.7) found **0 critical / 0 high**. Finding and
+fixing real issues in our own code — then publishing the loop — is the assurance we offer, not a claim of a
+clean first sheet. Findings and remediation are recorded in `CHANGELOG.md`; core changes since the assessed
+build are itemised there too. See `FOR_AUDITORS.md` for scope and reproduction details.
 

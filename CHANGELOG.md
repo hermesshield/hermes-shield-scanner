@@ -129,7 +129,7 @@ dangerous one. Re-validation of this core against the independent assessment (la
   API). Promote-only preserved; `isolation_config` no longer mislabels the refused path.
 - **`FOR_AUDITORS.md` reconciled with `--prove`** (it no longer claims PoCs are never run); **`RELEASES.md`**
   rewritten as a clean public version ledger (internal GTM removed) that states the core is byte-identical
-  across versions; **`BENCHMARKS.md` added** — the 12 audited frameworks with pinned commits and the
+  across versions; **`BENCHMARKS.md` added** — the 12 scanned frameworks with pinned commits and the
   8,509 / 474 / 520 counts, so the README's figures are verifiable.
 - **README** images switched to absolute URLs (render on PyPI); the sunset hero banner is the header; the CI
   exit-code behaviour is documented (exit 0 regardless of findings — parse the report JSON to gate CI).
