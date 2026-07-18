@@ -54,6 +54,64 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
   the review tier (never the red fix-first table) and is never `block_live_promotion`, that a red action still
   blocks, and that hard-block verdicts still block. Suite: **422 passed**.
 
+### Changed — DEDUP HARDENING: "a safe sink can no longer hide a dangerous one" (Fable-5 under-report class, structurally closed)
+
+- **The class, in one line.** When several raw sinks of the same scope/capability collapsed to a single
+  customer-facing row (dedup), the scanner used to pick the *displayed* row by a **pre-verdict severity
+  proxy** (`repo_scanner._sink_severity`, which ranks only taint + destination). Any verdict-determining
+  signal the proxy could not see let a **benign representative hide a band-driving sibling**, lowering the
+  customer band (RED → AMBER/BLUE). This is a **under-report** family: the scan says "safe" while a real
+  reachable-unguarded sink sits folded behind the row.
+- **Why it kept coming back (the whack-a-mole).** Each newly-found axis was patched by bolting on another
+  partition key or extending the proxy — but only for the axis someone had already found:
+  1. **Taint axis** — an untainted send that sorts first hid a tainted exfil sibling → fixed by choosing the
+     **worst `_sink_severity` member** instead of the textually-first one.
+  2. **Destination axis** — a constant/config-destination send hid an attacker-controlled-destination exfil
+     of the same partition → same worst-member fix folded it in.
+  3. **Guard-wrapper axis** — a guardable call and its wrapper shared a partition → fixed by keying the
+     partition on the **distinct call name** (`975a425`).
+  4. **Shell-form axis** — a non-shell subprocess hid a shell-injection sibling → fixed by adding
+     **`shell_form` to the partition key** (`8f2bab9`).
+  Every fix was reactive. The **5th axis** (guard **strength** vs proof-identity) proved the pattern was
+  open-ended: `fg.prove()` counts a `LOCAL_DEFINITION` **decoy guard** as "proven", so a decoy-guarded RED
+  exfil and a genuinely kill-switch-guarded REVIEW sibling landed in the **same "proven" partition**, and the
+  proxy — ranking the guarded sibling higher on its taint/dest tuple — folded the RED sink behind it and
+  reported BLUE. Context/mutating was a lurking **6th** candidate.
+- **The structural fix (stop adding keys; fold AFTER the verdict).** Instead of a 7th partition key,
+  `repo_scanner` now **emits a full surface for every raw sink** of a partition (the display-preferred
+  representative carries the others on `_dedup_folded`). `scan_hermes.run_scan` merges those shadows into the
+  surface set so **every** raw sink is banded by the full verdict pipeline (classify → cross-module →
+  inter-procedural taint → **guard-attribution**). Then `install_report.collapse_dedup_to_worst_band` folds
+  each partition back to **one display row — the WORST-BANDED member** — using **exactly the shared band
+  predicates** (`is_non_gated_vulnerable` / `is_reachable_amber_action` / `is_reachable_fixed_dest_review`)
+  that drive `verdict_band`. The survivor therefore drives the **max band over ALL raw members on every axis**
+  — taint, destination, shell form, guard strength, context/mutating, and **any future verdict input** — so a
+  folded sibling can **never** lower the band, independent of which sink is the display representative.
+- **Why this closes the CLASS, not just the 5th axis.** The collapse runs **immediately after
+  guard-attribution**, which is the **last** pass that can write a band-driving verdict
+  (`UNGUARDED_CRITICAL_LIVE_SINK` / `CONFIG_DESTINATION_WRITE_REVIEW`). The only later passes
+  (`entrypoint_proof`, `guard_integrity`) write **downgrade/neutral** verdicts only
+  (`NEEDS_ENTRYPOINT_CONFIG`, `EXPECTED_GUARD_UNPROVEN`, `PROTECTED_BY_REVIEWED_ENTRYPOINT`,
+  `GUARD_INTEGRITY_SUSPECT`), so no later pass can escalate a folded sibling above the chosen survivor. The
+  band is now a **provable function of the worst raw sink**, not of display-row selection.
+- **Invariants preserved.**
+  - **No under-count** — the fold only ever **raises** a partition to its true worst band, never lowers it.
+  - **No over-count** — exactly **one row per partition** survives (verified on the real repo: max 1 surface
+    per partition id, 0 leaked `_dedup_folded` shadows); display and band-driving counts are unchanged when
+    no sibling was hidden.
+  - **No display churn** — when all members share the worst band, the survivor is the display-preferred
+    member and source order is preserved: **byte-identical** to the prior behaviour on any partition that had
+    no hidden band-driving sibling (`band_promoted == 0` on the whole hermes-social scan).
+  - **Loop-1 honesty invariant intact** — every band predicate still gates on `detection_source == "static"`,
+    so an AI-suspected guess can never drive RED or AMBER via a folded sibling.
+- **Tests.** New `tests/test_dedup_worst_band.py`: (1) **end-to-end** reproduction of the 5th axis — a
+  decoy-guarded RED exfil sharing a "proven" partition with a critically-guarded REVIEW sibling stays **RED
+  in both source orders** (order-independence); (2) the **collapse invariant itself**, parametrised across
+  taint / destination / shell / guard-strength / context(mutating) / amber-action / amber-fixed — survivor
+  band == max band over all raw members, one row per partition, with the promotion recorded; plus
+  all-benign-keeps-display and non-partitioned-surfaces-untouched cases. Full suite: **463 passed, 0
+  skipped**.
+
 ## [0.7.1] — 2026-07-17  ·  FIRST PUBLIC RELEASE (launch-hardening)
 
 ### Changed / Fixed (from an adversarial launch review — no scan-engine change)

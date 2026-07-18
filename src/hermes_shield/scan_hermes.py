@@ -116,6 +116,20 @@ def run_scan(root: Path, progress=None, out_dir=None):
                              "trusted_by_operator": bool(_tg_trusted),
                              "status": "operator-trusted" if _tg_trusted else "advisory-only (untrusted)"}
     _emit(phase="map", done=True, files=scan["files_scanned"], surfaces=len(scan["surfaces"]))
+    # STRUCTURAL dedup redesign (Fable-5 band-suppression class): repo_scanner returns ONE display
+    # representative per dedup partition but parks the OTHER raw sinks of the partition on it (._dedup_folded).
+    # Merge those shadows into the surface set so the verdict passes (cross-module, taint, guard-attribution)
+    # band EVERY raw sink; install_report.collapse_dedup_to_worst_band (after guard-attribution) then folds each
+    # partition back to ONE display row — the WORST-BANDED member — so a folded sibling can never lower the
+    # band on ANY axis. Off-partition surfaces (regex-fallback etc.) carry no ._dedup_folded and are untouched.
+    _folded_shadows = []
+    for _s in scan["surfaces"]:
+        _fs = getattr(_s, "_dedup_folded", None)
+        if _fs:
+            _folded_shadows.extend(_fs)
+            _s._dedup_folded = None
+    if _folded_shadows:
+        scan["surfaces"].extend(_folded_shadows)
     _emit(phase="reach", start=True, total=len(scan["surfaces"]))
     guard_detector.attach_test_evidence(scan["surfaces"], root)
     # S8 SPEED: build the whole-repo call graph ONCE and share it across cross_module, inter_taint,
@@ -165,6 +179,16 @@ def run_scan(root: Path, progress=None, out_dir=None):
         import sys as _sys
         print(f"WARNING: guard_attribution pass FAILED ({_ga_err}); severity ranking not applied", file=_sys.stderr)
         scan["guard_attribution_counts"] = {"error": str(_ga_err)}
+    # STRUCTURAL dedup collapse (Fable-5 band-suppression class): every raw sink of each dedup partition now
+    # carries its TRUE post-guard-attribution band, so fold each partition to its WORST-BANDED member. Runs
+    # BEFORE entrypoint_proof / guard_integrity / the live HUD / build_report so they all see the one-row-per-
+    # partition set (identical to before) — only the survivor's band is now provably the max over all raw
+    # members. Runs UNCONDITIONALLY (even on a guard_attribution failure) so the merged shadows never leak into
+    # the reported surface set as over-counted duplicate rows. Band-complete here: entrypoint_proof /
+    # guard_integrity never escalate to the band-driving verdicts (UNGUARDED_CRITICAL_LIVE_SINK /
+    # CONFIG_DESTINATION_WRITE_REVIEW), so no later pass can raise a folded sibling above the chosen survivor.
+    from . import install_report as _IR_collapse
+    scan["dedup_collapse"] = _IR_collapse.collapse_dedup_to_worst_band(scan["surfaces"])
     # P2.9F: reviewed real-entrypoint proof for modelled public helpers (runs AFTER classify; it sets
     # the final verdict directly for modelled helpers).
     try:

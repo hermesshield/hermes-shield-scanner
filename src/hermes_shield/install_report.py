@@ -102,6 +102,92 @@ def is_reachable_fixed_dest_review(s) -> bool:
             and getattr(s, "verdict", "") == "CONFIG_DESTINATION_WRITE_REVIEW")
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════════════════
+# STRUCTURAL dedup band-suppression fix (Fable-5 dedup under-report class — the 5th/6th-axis closure).
+#
+# A dedup partition (all raw sinks sharing s.dedup_partition_id) is collapsed to ONE customer-facing display
+# row. Historically the row was chosen by a PRE-VERDICT severity proxy (repo_scanner._sink_severity, which
+# ranks only taint + destination), so any verdict-determining input the proxy could not see — guard STRENGTH
+# vs proof-identity, context/mutating, and any future axis — let a benign representative HIDE a band-driving
+# sibling, lowering the customer band (RED/AMBER/BLUE). This closes the whole class structurally: the survivor
+# is chosen as the WORST-BANDED raw member AFTER the verdict pipeline has run, so a folded sibling can never
+# lower the band — on ANY axis — and the band no longer depends on which sink is the display representative.
+# Display / band-driving counts stay one row per partition (no over-count); the fold only ever RAISES a
+# partition's band to its true worst, never lowers it (no under-count).
+
+
+def _surface_band_rank(s) -> int:
+    """The band tier a SINGLE raw surface drives, highest == worst. Uses EXACTLY the shared predicates that
+    build_report / verdict_band use, so the worst-ranked member of a dedup partition drives the same band that
+    member would drive as the sole surface. Capability is constant within a partition, so this differentiates
+    members purely by verdict / taint / context — the axes _sink_severity could not see.
+
+      4  RED   — reachable + unguarded live sink (is_non_gated_vulnerable).
+      3  AMBER — reachable + unguarded reversible/social action OR fixed-destination review.
+      2  AMBER — install-liability (RCE-class present, not reachable-red here — "review before you ship").
+      1  lower — guarded / act-liability / blue.
+    """
+    if is_non_gated_vulnerable(s):
+        return 4
+    if is_reachable_amber_action(s) or is_reachable_fixed_dest_review(s):
+        return 3
+    if (getattr(s, "context", "prod") == "prod"
+            and getattr(s, "detection_source", "static") == "static"
+            and getattr(s, "capability", "") in _RCE_CAPS
+            and getattr(s, "verdict", "") != "UNGUARDED_CRITICAL_LIVE_SINK"):
+        return 2
+    return 1
+
+
+def collapse_dedup_to_worst_band(surfaces) -> dict:
+    """Fold each dedup partition (surfaces sharing s.dedup_partition_id) to ONE display row: the WORST-BANDED
+    member. MUST run AFTER the verdict pipeline (guard_attribution) so every raw sink carries its true band,
+    and BEFORE build_report / the --live HUD so both see the collapsed one-row-per-partition set.
+
+    Guarantees:
+      * NO band-suppression — the survivor's band == max band over all raw members of its partition, on every
+        axis (guard strength, taint, destination, shell form, context/mutating, and any future verdict input).
+        A folded sibling can never lower the band.
+      * NO over-count — exactly one surface survives per partition (unchanged display / band-driving counts).
+      * NO under-count — the fold only ever raises a partition to its true worst band, never lowers it.
+
+    Ties (all members share the worst band) keep the display-preferred member (worst _sink_severity), then the
+    earliest source order — byte-identical display to the pre-redesign first-/worst-proxy behaviour on any
+    partition that had no hidden band-driving sibling. Mutates `surfaces` in place; returns diagnostics."""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    order = {}
+    for i, s in enumerate(surfaces):
+        pid = getattr(s, "dedup_partition_id", None)
+        if pid is None:                     # regex-fallback / AI-suspected / non-partitioned surfaces
+            continue
+        order[id(s)] = i
+        groups[pid].append(s)
+    folded_ids = set()
+    promoted = 0
+    for pid, members in groups.items():
+        survivor = max(members, key=lambda s: (
+            _surface_band_rank(s),
+            1 if getattr(s, "dedup_display_pref", False) else 0,
+            -order[id(s)]))
+        # the row the OLD proxy would have shown (display-preferred), for the promotion diagnostic
+        display = max(members, key=lambda s: (
+            1 if getattr(s, "dedup_display_pref", False) else 0, -order[id(s)]))
+        if _surface_band_rank(survivor) > _surface_band_rank(display):
+            promoted += 1
+        sib_lines = sorted({getattr(g, "sink_line", 0) or g.line_start
+                            for g in members if g is not survivor})
+        survivor.guard_proof["sibling_sink_lines"] = sib_lines
+        for g in members:
+            if hasattr(g, "_dedup_folded"):
+                g._dedup_folded = None      # drop the parked raw surfaces; they are collapsed away now
+            if g is not survivor:
+                folded_ids.add(id(g))
+    if folded_ids:
+        surfaces[:] = [s for s in surfaces if id(s) not in folded_ids]
+    return {"partitions": len(groups), "collapsed": len(folded_ids), "band_promoted": promoted}
+
+
 # ---- OWASP Risk Rating (Severity x Likelihood -> Low/Med/High). Refs: OWASP Risk Rating Methodology;
 # NIST SP 800-30 Rev.1 (5-level qualitative scales + Risk-Level Matrix); ISO/IEC 27005. (S8.66) ----
 _SEVERITY = {

@@ -287,44 +287,53 @@ def scan_file(path: Path, root: Path):
                     # splits a non-subprocess group — no over-report, benign groups unchanged.
                     by_axis[(g, (sk.get("call_expr", "") or "").strip() if g else "",
                              bool(sk.get("shell_form", True)))].append(sk)
-                for target_group in by_axis.values():
-                    # ROOT FIX (Fable-5): the representative is the WORST/most-severe member of the
-                    # partition, NEVER merely target_group[0] (textually first). The old first-wins choice let
-                    # a benign sibling that happened to appear first — untainted, or a constant/config
-                    # destination — become the sole surface and DISCARD the taint / tainted_destination /
-                    # dest_provenance signals of a genuinely reachable-unguarded-tainted exfil sink of the SAME
-                    # (scope, cap, proof-status, guard-axis) partition, collapsing the verdict to BLUE/AMBER
-                    # (the taint axis: untainted send first hides tainted exfil; the destination axis:
-                    # constant-dest first hides attacker-dest exfil). Picking the worst member closes the whole
-                    # family without adding another partition key; the guardable/proof-status splits above keep
-                    # the guard axis closed (975a425). max() is a tie-stable de-hider: an all-benign partition
-                    # keeps its first member, so counts never balloon and benign groups never gain a false RED.
-                    chosen = max(target_group, key=_sink_severity)
-                    # DISPLAY symbol stays the BARE enclosing name (scope path is a grouping key only), so the
-                    # customer-facing `symbol` field is unchanged.
-                    sym = chosen["enclosing_symbol"]
-                    surf = _make(chosen["line"], cap, chosen["mutating"], sym,
-                                 chosen["call_expr"], chosen["sink_kind"], chosen["module_scope"])
-                    surf.dest_provenance = chosen.get("dest_provenance", "unknown")   # FP3
-                    if surf.sink_line in dest_info:                                    # Fix1: dataflow refinement
-                        _prov, _tdest = dest_info[surf.sink_line]
-                        surf.dest_provenance = _prov
-                        surf.tainted_destination = _tdest
-                    surf.auth_gated = chosen.get("auth_gated", False)                 # FP4
-                    surf.shell_form = chosen.get("shell_form", True)                  # S8.46
-                    if cap == "code_exec" and chosen["line"] in llm_eval_lines:        # S8.72 eval-on-LLM-output class
-                        surf.guard_proof["llm_output_eval"] = llm_eval_lines[chosen["line"]]
-                    # Fable-5 evidence-trail fix: siblings are every folded member EXCEPT the chosen
-                    # representative — NOT target_group[1:]. When max() picks a later (worst) member, the
-                    # representative is no longer target_group[0]; slicing [1:] would list the representative's
-                    # own line as its sibling and DROP the textually-first member's line from the evidence
-                    # trail. Filter by identity so the physical-sink line list is always exactly the other
-                    # folded sinks.
-                    surf.guard_proof.setdefault(
-                        "sibling_sink_lines", [g["line"] for g in target_group if g is not chosen])
-                    if proven and unproven:
-                        surf.guard_proof["dedup_group"] = f"{sym}:{cap}"
-                    surfaces.append(surf)
+                for _axis_key, target_group in by_axis.items():
+                    # STRUCTURAL REDESIGN (Fable-5 dedup class — close band-suppression on EVERY axis).
+                    # Representative-selection by a PRE-VERDICT proxy (_sink_severity ranks only taint/dest) was
+                    # whack-a-mole: any verdict-determining input that is neither a partition key nor in the proxy
+                    # was a latent hole where a benign representative hid a band-driving sibling. The proven axis
+                    # was guard STRENGTH vs proof-identity — fg.prove() counts a LOCAL_DEFINITION decoy as
+                    # 'proven', but guard_attribution rejects it (MED-1 _CRITICAL_IDENTITY), so a decoy-guarded RED
+                    # sink and a critically-guarded REVIEW sink shared one 'proven' partition and the proxy folded
+                    # the RED one behind the guarded sibling with the higher taint/dest tuple (context/mutating was
+                    # a 6th candidate). Rather than add a 7th partition key, we now BUILD a full surface for EVERY
+                    # raw sink of the partition and DEFER the one-row collapse to a POST-VERDICT pass
+                    # (install_report.collapse_dedup_to_worst_band, run in scan_hermes AFTER guard_attribution) that
+                    # keeps the WORST-BANDED member. The survivor then drives the max band over ALL raw members on
+                    # every axis — a folded sibling can NEVER lower the band — while display/counts stay one row per
+                    # partition. repo_scanner still RETURNS one representative per partition (the display-preferred
+                    # = worst-_sink_severity member, byte-identical to before for direct scan_repo callers); the
+                    # other raw surfaces ride on it as `_dedup_folded` and are merged into the surface set for the
+                    # verdict passes, then collapsed away.
+                    pid = f"{rel}::{scope}::{cap}::{'proven' if group is proven else 'unproven'}::{_axis_key!r}"
+                    display_pref = max(target_group, key=_sink_severity)
+                    built = []
+                    for sk in target_group:
+                        # DISPLAY symbol stays the BARE enclosing name (scope path is a grouping key only).
+                        sym = sk["enclosing_symbol"]
+                        surf = _make(sk["line"], cap, sk["mutating"], sym,
+                                     sk["call_expr"], sk["sink_kind"], sk["module_scope"])
+                        surf.dest_provenance = sk.get("dest_provenance", "unknown")   # FP3
+                        if surf.sink_line in dest_info:                               # Fix1: dataflow refinement
+                            _prov, _tdest = dest_info[surf.sink_line]
+                            surf.dest_provenance = _prov
+                            surf.tainted_destination = _tdest
+                        surf.auth_gated = sk.get("auth_gated", False)                 # FP4
+                        surf.shell_form = sk.get("shell_form", True)                  # S8.46
+                        if cap == "code_exec" and sk["line"] in llm_eval_lines:        # S8.72 eval-on-LLM-output
+                            surf.guard_proof["llm_output_eval"] = llm_eval_lines[sk["line"]]
+                        surf.dedup_partition_id = pid
+                        surf.dedup_display_pref = (sk is display_pref)
+                        if proven and unproven:
+                            surf.guard_proof["dedup_group"] = f"{sym}:{cap}"
+                        built.append(surf)
+                    rep = next(s for s in built if s.dedup_display_pref)
+                    # Preliminary sibling trail for DIRECT scan_repo callers (the collapse pass runs only under
+                    # scan_hermes.run_scan). collapse_dedup_to_worst_band recomputes it for the true survivor.
+                    rep.guard_proof.setdefault(
+                        "sibling_sink_lines", sorted({b.sink_line for b in built if b is not rep}))
+                    rep._dedup_folded = [b for b in built if b is not rep]
+                    surfaces.append(rep)
     else:
         # regex fallback ONLY when the file does not parse — labelled weak, never full-path.
         for i, line in enumerate(lines, 1):
