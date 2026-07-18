@@ -31,6 +31,10 @@ from .call_graph import FileGraph
 
 _MAX_DEPTH = 4
 
+# Fix1: fixed-channel / external capabilities whose DESTINATION argument is separable from the CONTENT.
+# A tainted-CONTENT send to a non-attacker-controlled destination is demoted to AMBER review (see apply).
+_FIXED_DEST_CAPS = {"external_write", "telegram_send", "email_send"}
+
 # verdicts the scanner ENFORCES as block-live-promotion. UNGUARDED_CRITICAL_LIVE_SINK joins the set so
 # the rank-0 floor actually gates (adversarial-marker blocker: the signal enforced nothing before).
 _ENFORCED_BLOCK = {"BLOCK_LIVE_PROMOTION", "GUARD_LOST", "UNGUARDED_CRITICAL_LIVE_SINK"}
@@ -107,8 +111,15 @@ def _mod_tail(file_path: str) -> str:
     return Path(file_path).stem
 
 
-def attribute(surface, graphs: Dict[str, FileGraph], mod2files: dict = None) -> dict:
-    """Compute critical_guard_on_path for one surface. Returns the guard_attribution dict."""
+def attribute(surface, graphs: Dict[str, FileGraph], mod2files: dict = None, inner_sinks: dict = None) -> dict:
+    """Compute critical_guard_on_path for one surface. Returns the guard_attribution dict.
+
+    `inner_sinks` (Fix 2) maps (file_rel, enclosing_fn) -> [critical-cap sink lines] and enables a bounded
+    ONE-HOP DOWNWARD guard credit: when the sink LINE is itself a direct call to a RESOLVED in-repo wrapper
+    function whose OWN inner action sink is dominated by a critical guard, the guarded wrapper call-site is
+    credited (state 'yes' -> REVIEW), instead of double-counting the phantom entrypoint call-site as
+    unguarded. Sound: the callee must RESOLVE (local def or resolved import) and EVERY inner critical sink
+    must be guarded — a name match or an unguarded sibling is never credited."""
     if mod2files is None:
         from .cross_module import build_mod2files
         mod2files = build_mod2files(graphs)
@@ -161,9 +172,72 @@ def attribute(surface, graphs: Dict[str, FileGraph], mod2files: dict = None) -> 
         return "unknown"
 
     result = visit(fg, sink_fn, surface.line_start, 0)
+    # Fix 2: one-hop DOWNWARD credit. If the sink line is a call INTO a resolved in-repo wrapper that is
+    # itself critically guarded, the call-site is guarded — do not leave it rank-0 as a phantom entrypoint.
+    if result != "yes" and inner_sinks:
+        hop = _one_hop_guarded(surface, fg, sink_fn, graphs, mod2files, inner_sinks)
+        if hop:
+            for g in hop["guards"]:
+                guards_found.append({"guard_type": g[1], "identity": g[2], "guard_line": g[0],
+                                     "at": f'{hop["callee_path"]}::{hop["callee"]}', "via": "one_hop_callee"})
+            result = "yes"
+            if hop["callee_path"] != surface.file_path:
+                scope["cross"] = True
+
     return {"critical_guard_on_path": result, "guards_found": guards_found,
             "unguarded_paths": unguarded, "resolution_limits": limits,
             "path_scope": "interprocedural_visible" if scope["cross"] else "intraprocedural"}
+
+
+def _resolve_callee(name: str, fg: FileGraph, home_rel: str, graphs: Dict[str, FileGraph], mod2files: dict):
+    """Resolve a name called at a sink line to its (callee_fg, callee_fn, callee_rel) — either a local def
+    in the SAME file or a RESOLVED cross-file import (unique-file resolver; ambiguous/foreign -> None).
+    Never a bare name match: an unresolved / dynamically-imported callee returns None (stays severe)."""
+    if name in fg.funcs:
+        return fg, name, home_rel
+    imp = fg.imports.get(name)
+    if imp and imp.get("orig") in (name, None):
+        from .cross_module import resolve_import_to_file
+        target = resolve_import_to_file(imp, home_rel, mod2files)
+        if target and target in graphs and graphs[target].ok:
+            callee_fn = imp.get("orig") or name
+            if callee_fn in graphs[target].funcs:
+                return graphs[target], callee_fn, target
+    return None, None, None
+
+
+def _one_hop_guarded(surface, fg: FileGraph, sink_fn: str, graphs: Dict[str, FileGraph],
+                     mod2files: dict, inner_sinks: dict):
+    """If the sink LINE is a direct call to a resolved in-repo wrapper whose EVERY inner critical sink is
+    dominated by a critical guard, return {callee, callee_path, guards}. Else None. Bounded to one hop."""
+    cap = surface.capability
+    f = fg.funcs.get(sink_fn)
+    if not f:
+        return None
+    sink_line = getattr(surface, "sink_line", 0) or surface.line_start
+    # names called exactly at the sink line (plain function calls only — a method on an unresolved receiver
+    # or a dotted dynamic import is not one-hop resolvable and must stay severe).
+    names = [bare for (ln, bare, _dotted, is_method) in f["all_calls"]
+             if ln == sink_line and bare and not is_method and "." not in bare]
+    for name in names:
+        if name == sink_fn:
+            continue                                          # never descend into self (recursion)
+        callee_fg, callee_fn, callee_rel = _resolve_callee(name, fg, surface.file_path, graphs, mod2files)
+        if not callee_fg or callee_fn not in callee_fg.funcs:
+            continue
+        inner = [ln for ln in inner_sinks.get((callee_rel, callee_fn), []) if ln != sink_line]
+        if not inner:
+            continue                                          # no proven inner sink -> nothing to credit
+        guards, ok = [], True
+        for inner_line in inner:
+            g = _critical_before(callee_fg, callee_fn, inner_line, cap)
+            if not g:
+                ok = False                                    # an unguarded inner sink -> never credit
+                break
+            guards.append(g)
+        if ok and guards:
+            return {"callee": callee_fn, "callee_path": callee_rel, "guards": guards}
+    return None
 
 
 def _path_of(fg: FileGraph, graphs: Dict[str, FileGraph]) -> str:
@@ -185,6 +259,20 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
         graphs = build_graphs(root, _all_py_rel(root))
     from .cross_module import build_mod2files
     mod2files = build_mod2files(graphs)
+    # Fix 2: index of every critical-capability sink by (file, enclosing_fn) so the one-hop descent can find
+    # a wrapper callee's OWN inner action sink line(s) and check they are critically guarded.
+    from collections import defaultdict as _dd
+    inner_sinks = _dd(list)
+    for _s in surfaces:
+        if _s.capability not in PAT.CRITICAL_CAPS:
+            continue
+        _g = graphs.get(_s.file_path)
+        if not _g or not _g.ok:
+            continue
+        _ln = getattr(_s, "sink_line", 0) or _s.line_start
+        _fn = _g.enclosing(_ln)
+        if _fn:
+            inner_sinks[(_s.file_path, _fn)].append(_ln)
     counts = {"unguarded_critical": 0, "guarded_review": 0, "partial": 0, "unknown": 0,
               "unguarded_unproven_reach": 0, "attributed": 0}
     _total = len(surfaces)
@@ -193,7 +281,7 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
             progress({"phase": "reach", "step": "guards", "traced": _i, "total": _total})
         if s.context != "prod" or s.capability not in PAT.CRITICAL_CAPS:
             continue
-        attr = attribute(s, graphs, mod2files)
+        attr = attribute(s, graphs, mod2files, inner_sinks)
         s.guard_attribution = attr
         state = attr["critical_guard_on_path"]
         # taint axis: True = PROVEN reachable from untrusted input (taint is intra-function, incomplete,
@@ -229,16 +317,28 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
             s.live_promotion_verdict = "REVIEW"
             counts["guarded_review"] += 1
             continue
-        # FP3 config-destination: an external_write whose DESTINATION is a constant/config value is not
-        # exfil regardless of whether the DATA is tainted — exfil needs an attacker-controlled DESTINATION,
-        # not merely untrusted data going to a fixed endpoint. (The harder constructed-URL cases are caught
-        # by the adversarial verifier, which reads the code.)
-        if (s.capability == "external_write" and getattr(s, "dest_provenance", "unknown") in ("constant", "config")):
-            s.severity_rank = 5
-            s.verdict = "CONFIG_DESTINATION_WRITE_REVIEW"
-            s.live_promotion_verdict = "REVIEW"
-            counts["guarded_review"] += 1
-            continue
+        # FP3/Fix1 fixed-destination: a fixed-channel messaging / external send whose DESTINATION is not
+        # attacker-controlled is not exfil, regardless of whether the CONTENT is tainted — exfil needs an
+        # attacker-controlled DESTINATION, not merely untrusted data going to a fixed endpoint. Demote to
+        # the AMBER review band (never ALLOW, never BLUE — see install_report.is_reachable_fixed_dest_review),
+        # on POSITIVE evidence, and ONLY when the destination arg itself is not tainted (CRUCIAL INVARIANT:
+        # a tainted chat_id / recipient / url stays RED -> falls through).
+        #   * external_write / email_send / telegram_send: ALL require a PROVEN constant/config destination.
+        #     An unknown destination is a real exfil channel and must stay RED — a chat_id / recipient / URL
+        #     that arrives as a bare parameter or is derived from a name removed from the untrusted set is
+        #     NOT proof of a fixed channel (the sole tainted_destination bit is intra-function and incomplete),
+        #     so telegram_send gets NO capability-based exemption: it is demoted only on the same
+        #     constant/config provenance evidence as the other two channels.
+        # (The harder constructed-destination cases are left RED for the adversarial verifier, which reads
+        # the code.)
+        if s.capability in _FIXED_DEST_CAPS and not getattr(s, "tainted_destination", False):
+            _prov = getattr(s, "dest_provenance", "unknown")
+            if _prov in ("constant", "config"):
+                s.severity_rank = 5
+                s.verdict = "CONFIG_DESTINATION_WRITE_REVIEW"
+                s.live_promotion_verdict = "REVIEW"
+                counts["guarded_review"] += 1
+                continue
         # S8.46 subprocess shell-form: a subprocess with a tainted DATA argument but NO shell interpretation
         # (subprocess.run([list])/Popen without shell=True) is NOT command injection — the arg is passed
         # literally, not parsed by a shell. Downgrade to review; shell=True and os.system stay critical.

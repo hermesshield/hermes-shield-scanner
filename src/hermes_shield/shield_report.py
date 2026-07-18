@@ -297,6 +297,7 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     reachable = _ir.get("non_gated_vulnerable", m["no_gate"])
     install_liab = _ir.get("install_liability_rce", 0)
     amber_actions = _ir.get("reachable_amber_actions", 0)
+    fixed_dest_reviews = _ir.get("reachable_fixed_dest_review", 0)
     proven = _ir.get("proven_live_poc", 0)
     band = (_ir.get("install_liability_rating") or {}).get("band", "Low")
     overall = _ir.get("overall_rating", "None (no proven-live)")
@@ -318,7 +319,7 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     # (install-liability only), CALM BLUE (neither). Blue is "no live threat PROVEN", never "secure".
     # CANONICAL verdict — shared with the CLI (install_report.verdict_band) so the HTML banner and the CLI
     # can never disagree. This chooses the band/icon/head; the human-facing sub-copy is built per-band below.
-    _vb = IR.verdict_band(reachable, proven, install_liab, amber_actions)
+    _vb = IR.verdict_band(reachable, proven, install_liab, amber_actions, fixed_dest_reviews)
     b_cls, b_icon, b_head = _vb["code"], _vb["icon"], _vb["head"]
     if proven > 0 or reachable > 0:
         n = reachable if reachable else proven
@@ -327,10 +328,20 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         if proven:
             b_sub += (f" <b>{proven}</b> {_pl(proven, 'is', 'are')} proven-live — we demonstrated a real "
                       f"attack path.")
-    elif amber_actions > 0:
-        b_sub = (f"<b>{amber_actions} reversible {_pl(amber_actions, 'action', 'actions')}</b> "
-                 f"(post, reply, like) an attacker can reach here with nothing in the way — lower "
-                 f"blast-radius than the red band, but review before you ship.")
+    elif amber_actions > 0 or fixed_dest_reviews > 0:
+        if amber_actions > 0:
+            b_sub = (f"<b>{amber_actions} reversible {_pl(amber_actions, 'action', 'actions')}</b> "
+                     f"(post, reply, like) an attacker can reach here with nothing in the way — lower "
+                     f"blast-radius than the red band, but review before you ship.")
+            if fixed_dest_reviews:
+                b_sub += (f" Plus <b>{fixed_dest_reviews}</b> fixed-destination "
+                          f"{_pl(fixed_dest_reviews, 'send', 'sends')} (config/constant destination) reachable "
+                          f"with tainted content — not exfil, but review.")
+        else:
+            b_sub = (f"<b>{fixed_dest_reviews} fixed-destination {_pl(fixed_dest_reviews, 'send', 'sends')}</b> "
+                     f"(a messaging/external send to a proven config/constant destination) an attacker can "
+                     f"reach here with tainted content — not exfil (the destination can't be steered), but "
+                     f"review before you ship.")
         if install_liab:
             b_sub += (f" Plus <b>{install_liab}</b> install-liability {_pl(install_liab, 'item', 'items')} "
                       f"that {_pl(install_liab, 'goes', 'go')} live on install.")
@@ -351,10 +362,18 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
                      f"use {_pl(n, 'it', 'them')} today.")
         pw_do = ("<b>Work the fix plan below, top to bottom</b> — the items marked "
                  "“reachable now — fix first” come first.")
-    elif amber_actions > 0:
-        pw_urgent = (f"<b>{amber_actions} reversible {_pl(amber_actions, 'action is', 'actions are')} "
-                     f"reachable with no control</b> — a hijacked agent could post, reply or like as you "
-                     f"today. Lower blast-radius than the red band, but not nothing.")
+    elif amber_actions > 0 or fixed_dest_reviews > 0:
+        if amber_actions > 0:
+            pw_urgent = (f"<b>{amber_actions} reversible {_pl(amber_actions, 'action is', 'actions are')} "
+                         f"reachable with no control</b> — a hijacked agent could post, reply or like as you "
+                         f"today. Lower blast-radius than the red band, but not nothing.")
+            if fixed_dest_reviews:
+                pw_urgent += (f" Plus <b>{fixed_dest_reviews} fixed-destination "
+                              f"{_pl(fixed_dest_reviews, 'send', 'sends')}</b> reachable with tainted content.")
+        else:
+            pw_urgent = (f"<b>{fixed_dest_reviews} fixed-destination {_pl(fixed_dest_reviews, 'send is', 'sends are')} "
+                         f"reachable with no control</b> — a hijacked agent could push tainted content through a "
+                         f"messaging/external send today. The destination is fixed (not exfil), but not nothing.")
         pw_do = ("<b>Review the “reachable actions” band below</b> and gate each one before you ship.")
     elif install_liab > 0:
         pw_urgent = (f"<b>Nothing is reachable right now</b> — but {install_liab} install-liability "
@@ -466,6 +485,20 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         "are <b>reversible or social</b> — lower blast-radius than the red “Reachable in-repo” band above, "
         "but a hijacked agent could still post, reply or like as you. <b>Review and gate each one before you "
         f"ship.</b></div><table>{rows(amber_live)}</table>")
+
+    # ---- FIXED-DESTINATION band: messaging/external sends demoted to CONFIG_DESTINATION_WRITE_REVIEW — the
+    # destination is a PROVEN fixed (config/constant) channel so it is not exfil, but the send is still
+    # reachable + unguarded with tainted content. A distinct AMBER band — never folded into red, NEVER
+    # silently dropped to BLUE (the actions-firewall invariant). Rendered only when present.
+    fixed_dest_live = [s for s in scan["surfaces"] if IR.is_reachable_fixed_dest_review(s)]
+    fixed_dest_band_html = "" if not fixed_dest_live else (
+        "<h2>▸ Fixed-destination sends — review "
+        "<span class=c>— live now, config/constant destination (not exfil)</span></h2>"
+        "<div class=tier>An untrusted input can reach these messaging/external sends with no control in the "
+        "way today. The <b>destination is proven fixed</b> (a config value or constant), so an attacker "
+        "cannot steer where the data goes — this is not exfil. But the <b>content is tainted</b> and the "
+        "send is unguarded, so a hijacked agent could still push attacker-shaped content through your own "
+        f"channel. <b>Review and gate each one before you ship.</b></div><table>{rows(fixed_dest_live)}</table>")
 
     band_class = {"Low": "lo", "Med": "md", "High": "hi"}.get(band, "lo")
     fonts = _font_face_css()
@@ -638,6 +671,8 @@ executed · the deterministic core makes no network calls (optional --ai/--deps 
 <table>{rows(live)}</table>
 
 {amber_band_html}
+
+{fixed_dest_band_html}
 
 <h2>▸ Fix plan <span class=c>— generated, not applied</span></h2>
 <div class=tier>Suggested fix-at-source controls for the confirmed no-control / fake-gate findings.

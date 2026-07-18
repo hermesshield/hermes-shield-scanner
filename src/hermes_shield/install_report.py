@@ -76,6 +76,26 @@ def is_reachable_amber_action(s) -> bool:
             and getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK")
 
 
+def is_reachable_fixed_dest_review(s) -> bool:
+    """THE shared predicate for a fixed-channel send (telegram/email/external_write) that guard_attribution
+    demoted to CONFIG_DESTINATION_WRITE_REVIEW: the DESTINATION is PROVEN fixed (constant/config, not
+    attacker-controlled) so it is NOT exfil — but the send is still reachable + unguarded with tainted
+    CONTENT, so it MUST NOT collapse to BLUE ("no live threat proven"). It lands in the AMBER
+    "reachable actions — review" band, exactly as the actions-firewall fix (commit ef394ba) requires:
+    a message-sending action that an agent can reach is never silently dropped.
+
+    INVARIANT 3 (nothing reachable-unguarded returns to BLUE): the fixed-dest demotion moves such a send
+    RED -> AMBER, never RED -> BLUE. This predicate is what feeds it into the AMBER band count.
+
+    Same static+prod honesty gate as the other two predicates — an AI-suspected model GUESS
+    (detection_source != "static") can NEVER drive amber, exactly as it can never drive red. The verdict
+    string CONFIG_DESTINATION_WRITE_REVIEW is only ever written by the fixed-destination demotion, so
+    keying on it is sufficient and cannot collide with the RED / social-amber partitions."""
+    return (getattr(s, "context", "prod") == "prod"
+            and getattr(s, "detection_source", "static") == "static"
+            and getattr(s, "verdict", "") == "CONFIG_DESTINATION_WRITE_REVIEW")
+
+
 # ---- OWASP Risk Rating (Severity x Likelihood -> Low/Med/High). Refs: OWASP Risk Rating Methodology;
 # NIST SP 800-30 Rev.1 (5-level qualitative scales + Risk-Level Matrix); ISO/IEC 27005. (S8.66) ----
 _SEVERITY = {
@@ -160,7 +180,8 @@ def install_liability_rating(surfaces) -> dict:
     }
 
 
-def verdict_band(reachable: int, proven: int, install_liab: int, amber_actions: int = 0) -> dict:
+def verdict_band(reachable: int, proven: int, install_liab: int, amber_actions: int = 0,
+                 fixed_dest_reviews: int = 0) -> dict:
     """Canonical RED / AMBER / BLUE verdict — the SINGLE source of truth shared by the customer HTML report
     (shield_report.build_html) and the CLI live experience (live_scan). The thresholds must never diverge,
     so both call THIS function:
@@ -169,18 +190,26 @@ def verdict_band(reachable: int, proven: int, install_liab: int, amber_actions: 
                                              UNGUARDED_CRITICAL_LIVE_SINK, RCE-class or high-impact action)
                                              OR a proven-live PoC.
       AMBER ("Reachable actions — review") — a reachable + unguarded REVERSIBLE/social action (post, like,
-                                             comment ...): live now, but lower blast-radius than the red band.
+                                             comment ...) OR a fixed-destination messaging/external send
+                                             demoted on proven constant/config destination provenance
+                                             (`fixed_dest_reviews` — not exfil, but still reachable + unguarded
+                                             with tainted content, so NEVER BLUE): live now, lower blast-radius
+                                             than the red band.
       AMBER ("Review before you ship")     — install-liability only (inert here, live on install).
       BLUE  ("No live threat proven")      — none of the above. NOT "secure" / not a clean bill of health.
 
-    HONESTY INVARIANT: `reachable` AND `amber_actions` MUST be deterministic static counts
-    (non_gated_vulnerable / reachable_amber_actions, both built from detection_source == "static" surfaces
-    only in build_report). An AI-suspected GUESS is filtered out upstream and can never reach this function,
-    so it can never turn a verdict RED **or** AMBER. `code` is the lower-case band; `head` is the base head
-    string (the report renders it as-is; the CLI upper-cases it)."""
+    HONESTY INVARIANT: `reachable`, `amber_actions` AND `fixed_dest_reviews` MUST be deterministic static
+    counts (non_gated_vulnerable / reachable_amber_actions / reachable_fixed_dest_review, all built from
+    detection_source == "static" surfaces only in build_report). An AI-suspected GUESS is filtered out
+    upstream and can never reach this function, so it can never turn a verdict RED **or** AMBER. `code` is
+    the lower-case band; `head` is the base head string (the report renders it as-is; the CLI upper-cases it).
+
+    INVARIANT 3 (nothing reachable-unguarded returns to BLUE): a fixed-destination send demoted from the
+    RED UNGUARDED_CRITICAL_LIVE_SINK lands here as `fixed_dest_reviews` and drives AMBER — it is never
+    counted by NO band and silently dropped to blue."""
     if proven > 0 or reachable > 0:
         return {"code": "red", "icon": "⚠", "head": "Action needed"}
-    if amber_actions > 0:
+    if amber_actions > 0 or fixed_dest_reviews > 0:
         return {"code": "amber", "icon": "▲", "head": "Reachable actions — review"}
     if install_liab > 0:
         return {"code": "amber", "icon": "▲", "head": "Review before you ship"}
@@ -267,9 +296,18 @@ def build_report(root, scan, validated=None) -> dict:
     # HUD stream and this deterministic count can never disagree. (surfaces is already prod+static and
     # `vulnerable` is already _VULN_CAPS, so this is exactly the prior set; the predicate just names it.)
     non_gated = [s for s in vulnerable if is_non_gated_vulnerable(s)]
-    # GATED vulnerable = reachable dangerous sink that a guard/mitigation downgraded (present but protected)
+    # FIXED-DESTINATION reviews = messaging/external sends demoted to CONFIG_DESTINATION_WRITE_REVIEW because
+    # the DESTINATION is proven fixed (constant/config) — not exfil, but still a reachable + unguarded send
+    # with tainted content. They drive the AMBER band (never BLUE). Computed BEFORE `gated` so they are
+    # counted in the amber bucket, not double-counted as "gated (protected)" — they are demoted on
+    # destination provenance, not on a guard. Static-only (invariant: an AI guess can never drive amber).
+    fixed_dest_reviews = [s for s in surfaces if is_reachable_fixed_dest_review(s)]
+    _fixed_dest_ids = {id(s) for s in fixed_dest_reviews}
+    # GATED vulnerable = reachable dangerous sink that a guard/mitigation downgraded (present but protected).
+    # Excludes the fixed-destination-demoted sends above (they are AMBER-review, not guard-protected).
     gated = [s for s in vulnerable if getattr(s, "tainted_reachable", False)
-             and getattr(s, "verdict", "") != "UNGUARDED_CRITICAL_LIVE_SINK"]
+             and getattr(s, "verdict", "") != "UNGUARDED_CRITICAL_LIVE_SINK"
+             and id(s) not in _fixed_dest_ids]
     # AMBER reachable actions = reachable + unguarded REVERSIBLE/social actions (post/like/comment ...).
     # Uses the SHARED is_reachable_amber_action predicate so the report count, the HTML band and the --live
     # finale can never diverge. Static-only (invariant 3: an AI guess can never drive this band either).
@@ -297,6 +335,7 @@ def build_report(root, scan, validated=None) -> dict:
         "vulnerable_surfaces": len(vulnerable),
         "non_gated_vulnerable": len(non_gated),          # KICKER: live threat, no guard (RED)
         "reachable_amber_actions": len(amber_actions),   # reachable+unguarded reversible/social actions (AMBER)
+        "reachable_fixed_dest_review": len(fixed_dest_reviews),  # fixed-dest messaging/external sends (AMBER, never BLUE)
         "gated_vulnerable": len(gated),                  # present but a guard/mitigation protects it
         "proven_live_poc": len(proven_live),             # human-traced + PoC-confirmed subset (never the raw count)
         "install_liability_rce": len(install_liab),      # inert here, live on install
@@ -308,6 +347,7 @@ def build_report(root, scan, validated=None) -> dict:
         "candidate_critical": {"count": len(candidate_crit), "items": [_row(s) for s in candidate_crit]},
         "non_gated_items": [_row(s) for s in non_gated[:50]],
         "amber_action_items": [_row(s) for s in amber_actions[:50]],
+        "fixed_dest_review_items": [_row(s) for s in fixed_dest_reviews[:50]],
     }
 
 
@@ -325,6 +365,9 @@ def render(report: dict) -> str:
     L.append(f"- **Non-gated (live threat):** {r['non_gated_vulnerable']} · **Gated (protected):** {r['gated_vulnerable']}")
     L.append(f"- **Reachable actions — review (amber):** {r.get('reachable_amber_actions', 0)} — reachable + "
              f"unguarded reversible/social actions (post/reply/like); lower blast-radius than the red band.")
+    L.append(f"- **Fixed-destination sends — review (amber):** {r.get('reachable_fixed_dest_review', 0)} — "
+             f"reachable + unguarded messaging/external sends to a proven fixed (config/constant) destination; "
+             f"tainted content, not exfil, but never a clean bill.")
     L.append("")
     L.append(f"## 🔴 PROVEN-LIVE (human-traced + PoC-confirmed): {r['proven_live']['count']}")
     L.append("Reachable + unguarded HERE now AND empirically proven — we ran the sink with a benign payload.")

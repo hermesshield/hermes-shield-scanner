@@ -105,6 +105,8 @@ def scan_file(path: Path, root: Path):
 
     ranges = []
     taint_edges = {}
+    _tree = None
+    _cli_main = False
     try:
         _tree = ast.parse(text)
         ranges = _function_ranges(_tree)
@@ -114,6 +116,7 @@ def scan_file(path: Path, root: Path):
         taint_edges = _TAINT.analyze(_tree, cli_main=_cli_main)   # {call_line: source} from untrusted input
     except Exception:
         ranges = []
+        _tree = None
 
     file_has_fence = bool(PAT.FENCE_MARKERS.search(text))
     _seen_caps = {}
@@ -171,6 +174,20 @@ def scan_file(path: Path, root: Path):
             llm_eval_lines = {f["line"]: f["confidence"] for f in _LE.detect(text)}
         except Exception:
             pass
+    # Fix1: dataflow-aware DESTINATION analysis for fixed-channel / external sinks. Resolves the
+    # destination arg (through one shallow level of local variable / payload-dict indirection), classifies
+    # its provenance (constant/config/unknown) and — crucially — whether TAINT reaches the DESTINATION
+    # specifically. A tainted-CONTENT send to a fixed destination is demoted downstream; a tainted
+    # DESTINATION stays RED. {sink_line: (provenance, tainted_destination)}.
+    dest_info = {}
+    if ast_ok and _tree is not None:
+        _dest_caps = {sk["line"]: sk["capability"] for sk in ast_sinks
+                      if sk.get("capability") in _AST._DEST_AWARE_CAPS}
+        if _dest_caps:
+            try:
+                dest_info = _AST.analyse_destinations(_tree, _dest_caps, cli_main=_cli_main)
+            except Exception:
+                dest_info = {}
     if ast_ok:
         from collections import defaultdict
         # P2.9F-REVIEW census fix: a browser SUBMIT inside a dedicated DM-send module IS a direct
@@ -208,6 +225,10 @@ def scan_file(path: Path, root: Path):
                 surf = _make(chosen["line"], cap, chosen["mutating"], sym,
                              chosen["call_expr"], chosen["sink_kind"], chosen["module_scope"])
                 surf.dest_provenance = chosen.get("dest_provenance", "unknown")   # FP3
+                if surf.sink_line in dest_info:                                    # Fix1: dataflow refinement
+                    _prov, _tdest = dest_info[surf.sink_line]
+                    surf.dest_provenance = _prov
+                    surf.tainted_destination = _tdest
                 surf.auth_gated = chosen.get("auth_gated", False)                 # FP4
                 surf.shell_form = chosen.get("shell_form", True)                  # S8.46
                 if cap == "code_exec" and chosen["line"] in llm_eval_lines:        # S8.72 eval-on-LLM-output class

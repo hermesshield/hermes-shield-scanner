@@ -659,26 +659,146 @@ def _is_auth_gated_route(node) -> bool:
     return False
 
 
-def _dest_provenance(node) -> str:
-    """external_write destination: 'constant' | 'config' (operator/user config) | 'unknown'. 'untrusted' is
-    handled downstream by the taint bit, so a tainted destination never gets demoted regardless of this."""
-    dest = node.args[0] if node.args else None
-    for kw in node.keywords:
-        if kw.arg in ("url", "endpoint", "uri"):
-            dest = kw.value
-    if dest is None:
+# FP-Fix1: capabilities whose DESTINATION is a distinct argument we can extract and reason about
+# separately from the (often-tainted) CONTENT argument. For these a tainted-CONTENT send to a
+# fixed/config destination is NOT exfil (see guard_attribution.apply's fixed-destination downgrade).
+_DEST_AWARE_CAPS = {"external_write", "telegram_send", "email_send"}
+
+
+def _unwrap_dest(node):
+    """Peel a single str()/int()/format() wrapper around a destination expression (chat_id is often
+    stringified: str(os.getenv('CHAT_ID'))). Returns the inner arg node, else the node unchanged."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+            and node.func.id in ("str", "int") and len(node.args) == 1 and not node.keywords:
+        return node.args[0]
+    return node
+
+
+def _dest_node(node: ast.Call, cap: str, assigns=None):
+    """The AST node of the DESTINATION argument for a fixed-channel / external sink, or None when the
+    destination is not a statically-identifiable argument. Capability-aware:
+      * external_write: the URL — args[0] or a url/endpoint/uri kwarg (unchanged behaviour);
+      * telegram_send: the chat_id — a chat_id= kwarg, the 'chat_id' key of a json=/data=/params= payload
+        dict (resolved through one level of local variable via `assigns`), else the first positional;
+      * email_send:   the recipient — a to/to_addr/recipient kwarg ONLY (a bare positional is ambiguous:
+        send_email(to, ...) is to-first but sendmail(from, to, ...) is from-first, so a positional is left
+        as 'unknown' rather than risk mis-reading the FROM address as the destination and under-reporting).
+    `assigns` (optional {name: value_node}) lets the telegram payload-dict be resolved through a local
+    variable (`payload = {...}; requests.post(url, json=payload)`)."""
+    assigns = assigns or {}
+    if cap == "external_write":
+        dest = node.args[0] if node.args else None
+        for kw in node.keywords:
+            if kw.arg in ("url", "endpoint", "uri"):
+                dest = kw.value
+        return dest
+    if cap == "telegram_send":
+        for kw in node.keywords:
+            if kw.arg == "chat_id":
+                return _unwrap_dest(kw.value)
+        for kw in node.keywords:
+            if kw.arg in ("json", "data", "params"):
+                d = kw.value
+                if isinstance(d, ast.Name) and isinstance(assigns.get(d.id), ast.Dict):
+                    d = assigns[d.id]
+                if isinstance(d, ast.Dict):
+                    for k, v in zip(d.keys, d.values):
+                        if isinstance(k, ast.Constant) and k.value == "chat_id":
+                            return _unwrap_dest(v)
+        return _unwrap_dest(node.args[0]) if node.args else None
+    if cap == "email_send":
+        for kw in node.keywords:
+            if kw.arg in ("to", "to_addr", "to_addrs", "to_email", "recipient", "recipients"):
+                return _unwrap_dest(kw.value)
+        return None
+    return None
+
+
+def _classify_dest(node, assigns=None) -> str:
+    """Provenance of a destination node: 'constant' | 'config' (operator/env/settings) | 'unknown'.
+    Follows one level of a simple local assignment (`chat = os.getenv(...)`) via `assigns`. A tainted
+    destination is never demoted by provenance — that is the separate tainted_destination bit."""
+    assigns = assigns or {}
+    seen = 0
+    while isinstance(node, ast.Name) and node.id in assigns and seen < 3:
+        node = _unwrap_dest(assigns[node.id])
+        seen += 1
+    if node is None:
         return "unknown"
-    if isinstance(dest, ast.Constant):
+    if isinstance(node, ast.Constant):
         return "constant"
-    root = dest
-    while isinstance(root, ast.Attribute):
+    if isinstance(node, ast.Call):                         # os.getenv('X') / config.get('X') -> operator config
+        d = _dotted(node.func) if isinstance(node.func, ast.Attribute) else ""
+        if d in ("os.getenv", "os.environ.get"):
+            return "config"
+        if isinstance(node.func, ast.Attribute) and node.func.attr in ("get", "getenv") \
+                and _chain_root(node) in _CONFIG_ROOTS:
+            return "config"
+    root = node                                            # os.environ['X'] / self.cfg.url / settings[...]
+    while isinstance(root, (ast.Attribute, ast.Subscript)):
         root = root.value
     if isinstance(root, ast.Name) and root.id in _CONFIG_ROOTS:
         return "config"
-    if isinstance(dest, ast.Attribute) and (dest.attr.endswith("_url") or dest.attr.endswith("_URL")
-                                            or dest.attr in ("endpoint", "webhook_url")):
+    if isinstance(node, ast.Attribute) and (node.attr.endswith("_url") or node.attr.endswith("_URL")
+                                            or node.attr in ("endpoint", "webhook_url")):
         return "config"
-    return "unknown"                                  # bare unknown variable stays HIGH
+    return "unknown"                                       # bare unknown variable stays HIGH
+
+
+def _dest_provenance(node, cap: str = "external_write") -> str:
+    """Inline (no dataflow) destination provenance for a sink Call, used to seed the sink dict. The
+    richer, dataflow-aware refinement (variable-resolved destination + taint) is analyse_destinations."""
+    return _classify_dest(_dest_node(node, cap))
+
+
+def _local_assigns(fnode) -> dict:
+    """{name: value_node} for simple/tuple local assignments in a function — one shallow level used to
+    resolve a destination bound through a variable (payload dict, chat = cfg.get(...))."""
+    out = {}
+    for n in ast.walk(fnode):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = n.value
+                elif isinstance(t, (ast.Tuple, ast.List)) and isinstance(n.value, (ast.Tuple, ast.List)) \
+                        and len(t.elts) == len(n.value.elts):
+                    for te, ve in zip(t.elts, n.value.elts):
+                        if isinstance(te, ast.Name):
+                            out[te.id] = ve
+    return out
+
+
+def analyse_destinations(tree, dest_caps: dict, cli_main: bool = False) -> dict:
+    """For each Call at a line in `dest_caps` ({line: capability}) resolve its DESTINATION argument
+    (through one shallow level of local variable / payload-dict indirection) and return
+    {line: (provenance, tainted_destination)}. provenance in {'constant','config','unknown'};
+    tainted_destination True iff untrusted taint reaches the DESTINATION arg specifically (not merely
+    the content). Sound-leaning: an unresolved destination -> ('unknown', False)."""
+    from . import taint as _T
+    out = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        assigns = _local_assigns(fn)
+        ft = None
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Call) and n.lineno in dest_caps:
+                cap = dest_caps[n.lineno]
+                dnode = _dest_node(n, cap, assigns)
+                if dnode is None:
+                    continue          # this Call has no destination arg; a sibling Call on the same line
+                    # (e.g. the receiver constructor in `M().send_email(...)`) may — do not clobber it.
+                if ft is None:
+                    ft = _T._FnTaint(fn, cli_main=cli_main)
+                prov = _classify_dest(dnode, assigns)
+                tainted, _ = ft.arg_taint(dnode)
+                prev = out.get(n.lineno)
+                if prev is None:
+                    out[n.lineno] = (prov, tainted)
+                else:                 # >1 real destination on one line: prefer a known provenance and, for
+                    pprov, ptaint = prev   # safety, OR the taint bits (any tainted destination -> tainted).
+                    out[n.lineno] = (prov if prov != "unknown" else pprov, ptaint or tainted)
+    return out
 
 
 class _Visitor(ast.NodeVisitor):
@@ -735,7 +855,7 @@ class _Visitor(ast.NodeVisitor):
                 "module_scope": not self.stack,
                 "call_expr": _chain_str(node.func) or _attr_name(node.func) or "",
                 "auth_gated": any(self.auth_stack),                              # FP4
-                "dest_provenance": _dest_provenance(node) if cap == "external_write" else "unknown",  # FP3
+                "dest_provenance": _dest_provenance(node, cap) if cap in _DEST_AWARE_CAPS else "unknown",  # FP3/Fix1
                 # S8.46: a subprocess is command-injectable only when the arg is SHELL-INTERPRETED (shell=True or
                 # an always-shell function). subprocess.run([list]) without shell is NOT injection via a data arg.
                 "shell_form": _subprocess_shell_form(node) if cap == "subprocess_exec" else True,

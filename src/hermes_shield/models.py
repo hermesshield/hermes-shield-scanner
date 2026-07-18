@@ -111,6 +111,10 @@ class ActionSurface:
     # S8.19 FP demotion evidence: destination provenance for external_write (constant/config/untrusted/
     # unknown) and whether the enclosing route is authenticated (FastAPI Depends(current_org/user)).
     dest_provenance: str = "unknown"
+    # Fix1: taint reaches the DESTINATION arg SPECIFICALLY (attacker-controlled chat_id / recipient / url).
+    # A fixed-channel messaging/external send with only tainted CONTENT (not destination) is demoted to
+    # AMBER review; a tainted DESTINATION stays RED (genuinely exfil-capable). Default False = not proven.
+    tainted_destination: bool = False
     auth_gated: bool = False
     shell_form: bool = True            # S8.46: subprocess is shell-interpreted (shell=True/os.system) -> a tainted arg is injectable
     language: str = "python"          # S8.24 multi-language: python | typescript | ...
