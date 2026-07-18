@@ -244,7 +244,14 @@ def scan_file(path: Path, root: Path):
                     return bool(ce) and "." not in ce
                 by_axis = defaultdict(list)
                 for sk in group:
-                    by_axis[_guardable(sk)].append(sk)
+                    # A guarded wrapper is one-hop-credited by its own bare NAME, not its position, so two
+                    # DIFFERENT bare-name calls (a guarded wrapper textually before a distinct unguarded sink
+                    # of the same capability/scope) must NOT share a representative — else the guarded-first
+                    # call survives and one-hop-credits the group to BLUE, silencing the real exfil. Key the
+                    # guardable partition on the distinct call name; dotted/direct sinks (never one-hop
+                    # credited) still share one representative.
+                    g = _guardable(sk)
+                    by_axis[(g, (sk.get("call_expr", "") or "").strip() if g else "")].append(sk)
                 for target_group in by_axis.values():
                     chosen = target_group[0]
                     # DISPLAY symbol stays the BARE enclosing name (scope path is a grouping key only), so the

@@ -239,9 +239,15 @@ def test_guarded_sibling_call_on_sink_line_does_not_hijack_credit(tmp_path):
         "    send_email(send_draft('log@x.com', body), body)\n"})   # guarded sibling on the SAME line
     call = [s for s in _surfaces(scan, "h.py", "email_send") if s.symbol == "handler"]
     assert call, "handler wrapper call-site surface not found"
-    assert all(s.sink_name == "send_email" for s in call)                 # the surface's OWN sink call
-    assert all(s.guard_attribution["critical_guard_on_path"] != "yes" for s in call)
-    assert all(s.verdict == "UNGUARDED_CRITICAL_LIVE_SINK" and s.severity_rank == 0 for s in call)
+    # the dedup guard-axis split now gives each distinct bare-name call its OWN surface, so the guarded
+    # wrapper `send_draft` surfaces separately (demoted) and the UNGUARDED `send_email` keeps its own RED
+    # surface — the guarded sibling can never hijack the unguarded sink's credit.
+    unguarded = [s for s in call if s.sink_name == "send_email"]
+    assert unguarded, "unguarded send_email surface not found"
+    assert all(s.guard_attribution["critical_guard_on_path"] != "yes" for s in unguarded)
+    assert all(s.verdict == "UNGUARDED_CRITICAL_LIVE_SINK" and s.severity_rank == 0 for s in unguarded)
+    assert all(s.verdict != "UNGUARDED_CRITICAL_LIVE_SINK"                  # guarded wrapper is not red
+               for s in call if s.sink_name == "send_draft")
     rep, vb = _band(tmp_path, scan)
     assert rep["non_gated_vulnerable"] >= 1 and vb["code"] == "red"
 
@@ -255,7 +261,9 @@ def test_nested_guarded_wrapper_on_sink_line_stays_red(tmp_path):
         "    result = send_email(body, send_draft('x@y.com', body))\n"})
     call = [s for s in _surfaces(scan, "n.py", "email_send") if s.symbol == "handler"]
     assert call
-    assert all(s.verdict == "UNGUARDED_CRITICAL_LIVE_SINK" and s.severity_rank == 0 for s in call)
+    unguarded = [s for s in call if s.sink_name == "send_email"]   # the surface's OWN unguarded sink
+    assert unguarded, "unguarded send_email surface not found"
+    assert all(s.verdict == "UNGUARDED_CRITICAL_LIVE_SINK" and s.severity_rank == 0 for s in unguarded)
 
 
 def test_guarded_wrapper_before_unguarded_direct_sink_stays_red_semicolon(tmp_path):
