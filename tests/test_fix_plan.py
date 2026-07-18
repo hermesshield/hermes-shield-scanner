@@ -118,3 +118,76 @@ def test_report_renders_fix_plan_section_in_both_formats():
         assert "never" in doc and "auto-fix" in doc          # "…under a human gate — never auto-fix"
         # a real fix-at-source control is rendered
         assert "ast.literal_eval" in doc
+
+
+# ---- 5. RED / AMBER / WIRING partition — the fix-plan tier reuses the SHARED predicates ----
+# Regression guard for the confirmed cross-surface gap: a reachable AMBER social action (post/reply/like)
+# carrying UNGUARDED_CRITICAL_LIVE_SINK must NOT be shown in the RED "fix first — reachable now" tier (the
+# deterministic banner + red reachable table call it amber). The bare-verdict test used to over-state it.
+
+from hermes_shield import install_report as IR  # noqa: E402
+
+
+def test_fix_plan_band_reuses_shared_predicates_not_bare_verdict():
+    red = _surf("payment")     # RED band cap  (_VULN_CAPS)  -> is_non_gated_vulnerable
+    amber = _surf("post")      # AMBER band cap (_AMBER_ACTION_CAPS) -> is_reachable_amber_action
+    # both carry the SAME verdict UNGUARDED_CRITICAL_LIVE_SINK — the bare-verdict test could not tell them apart
+    assert red.verdict == amber.verdict == "UNGUARDED_CRITICAL_LIVE_SINK"
+    out = {it["capability"]: it for it in SR._fix_plan_rows([(red, "NO_GATE"), (amber, "NO_GATE")])}
+
+    # RED: high-impact action -> fix-first, agreeing with the shared predicate
+    assert IR.is_non_gated_vulnerable(red) is True
+    assert out["payment"]["band"] == "red"
+    assert out["payment"]["tier"] == "reachable-in-repo"
+
+    # AMBER: reversible/social action -> reachable-action review, NEVER the red fix-first tier
+    assert IR.is_reachable_amber_action(amber) is True
+    assert IR.is_non_gated_vulnerable(amber) is False
+    assert out["post"]["band"] == "amber"
+    assert out["post"]["tier"] != "reachable-in-repo"
+    assert "review" in out["post"]["tier"].lower()
+
+
+def test_html_amber_action_routed_to_review_not_red_fix_first():
+    """The exact contradiction closed: an amber `post` sink must NOT render in the red 'fix first' table."""
+    scan = {"surfaces": [_surf("post")], "files_scanned": 1, "ai_tier_counts": {}}
+    html = SR.build_html(scan, "demo")
+    # the red fix-first table has NOTHING to fix first — the amber action is not red
+    assert "nothing reachable-unguarded to fix first" in html
+    assert "badge ff" not in html          # no red fix-first badge span is emitted
+    # it is routed to the amber fix-plan review section instead
+    assert "badge rv" in html
+    assert "Reachable actions — review before you ship" in html
+
+
+def test_patch_plan_block_flag_honours_red_amber_partition():
+    """The Repairer queue (hermes_patch_plan.json) block flag must match the report: a RED action blocks
+    live promotion; a reachable AMBER action is review-before-ship and is NEVER block_live_promotion."""
+    def _pp(cap, **kw):
+        d = dict(id="s1", capability=cap, verdict="UNGUARDED_CRITICAL_LIVE_SINK", context="prod",
+                 detection_source="static", file_path="pkg/x.py", line_start=10, risk_level="HIGH",
+                 live_capable=True, guards=SimpleNamespace(kill_switch=False), tainted_reachable=True,
+                 language="python")
+        d.update(kw)
+        return SimpleNamespace(**d)
+
+    red = PP.build([_pp("payment")])
+    amber = PP.build([_pp("post")])
+    assert red and red[0].block_live_promotion is True     # high-impact -> red-equivalent hard block
+    assert amber and amber[0].block_live_promotion is False  # reversible/social -> review, never red-block
+    # both still require human approval (nothing is silently dropped)
+    assert red[0].human_approval_required and amber[0].human_approval_required
+
+
+def test_patch_plan_explicit_hard_block_verdicts_still_block():
+    """The red/amber partition must NOT weaken the explicit hard-block verdicts (BLOCK_LIVE_PROMOTION,
+    GUARD_LOST) — those keep blocking regardless of capability band."""
+    def _pp(cap, verdict, **kw):
+        d = dict(id="s1", capability=cap, verdict=verdict, context="prod", detection_source="static",
+                 file_path="pkg/x.py", line_start=10, risk_level="HIGH", live_capable=True,
+                 guards=SimpleNamespace(kill_switch=False), tainted_reachable=True, language="python")
+        d.update(kw)
+        return SimpleNamespace(**d)
+    for v in ("BLOCK_LIVE_PROMOTION", "GUARD_LOST"):
+        items = PP.build([_pp("post", v)])   # even an amber cap under a hard-block verdict blocks
+        assert items and items[0].block_live_promotion is True

@@ -20,10 +20,25 @@ from pathlib import Path
 _RCE_CAPS = {"code_exec", "deserialize", "subprocess_exec", "ssti"}
 # broader dangerous-action capabilities (write/act) — inherited too, lower severity
 _ACT_CAPS = {"external_write", "file_write", "file_delete", "tool_invoke", "publish_write", "secret_exfil"}
-# the RED-driving vulnerable-capability set (RCE-class | write/act). A surface only counts toward the
-# deterministic non_gated_vulnerable (the ONE number allowed to turn the verdict / HUD red) if its
-# capability is in here — a raw UNGUARDED_CRITICAL_LIVE_SINK verdict alone is NOT sufficient.
-_VULN_CAPS = _RCE_CAPS | _ACT_CAPS
+
+# ---- ACTIONS-FIREWALL (the agent-action taxonomy). guard_attribution stamps UNGUARDED_CRITICAL_LIVE_SINK
+# onto ANY reachable-from-untrusted + unguarded CRITICAL_CAPS surface — which INCLUDES the agent-action
+# sinks (payment, email_send, dm, post, like, ...). Historically the report only counted _RCE_CAPS|_ACT_CAPS,
+# so a repo whose ONLY live sink was e.g. `email_send` or `payment` reported BLUE "no live threat proven" —
+# the agent could wire an untrusted prompt straight to a money-moving / message-sending action and the
+# scanner said nothing. This is the actions-firewall gap. Two severity bands per the agreed taxonomy:
+#   RED  — high-impact, costly-or-irreversible actions. These drive the SAME red verdict as an RCE sink
+#          (counted into non_gated_vulnerable via _VULN_CAPS below).
+#   AMBER — reversible / social actions. These resolve to a NEW "reachable actions — review" band —
+#          never BLUE (silently dropped), never RED. Counted separately as reachable_amber_actions.
+_RED_ACTION_CAPS = {"payment", "blockchain_tx", "cloud_write", "file_perms", "email_send", "dm",
+                    "telegram_send", "computer_use", "browser_submit"}
+_AMBER_ACTION_CAPS = {"post", "reply", "comment", "like", "browser_click", "browser_type", "queue_mutation"}
+
+# the RED-driving vulnerable-capability set (RCE-class | write/act | high-impact agent-action). A surface
+# only counts toward the deterministic non_gated_vulnerable (the ONE number allowed to turn the verdict /
+# HUD red) if its capability is in here — a raw UNGUARDED_CRITICAL_LIVE_SINK verdict alone is NOT sufficient.
+_VULN_CAPS = _RCE_CAPS | _ACT_CAPS | _RED_ACTION_CAPS
 
 
 def is_non_gated_vulnerable(s) -> bool:
@@ -47,12 +62,31 @@ def is_non_gated_vulnerable(s) -> bool:
             and getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK")
 
 
+def is_reachable_amber_action(s) -> bool:
+    """THE shared predicate for a reachable + unguarded AGENT-ACTION sink that resolves to the AMBER
+    'reachable actions — review' band (post / reply / like / comment / browser_click ...). It applies the
+    SAME static+prod+verdict gate as is_non_gated_vulnerable — so the Loop-1 invariant holds on this band
+    too: an AI-suspected model GUESS (detection_source != "static") can NEVER drive amber, exactly as it can
+    never drive red. The only difference is the capability set (_AMBER_ACTION_CAPS vs _VULN_CAPS). These two
+    predicates PARTITION the reachable-unguarded action surfaces: a capability is either red-driving or
+    amber-band, never both, and nothing carrying UNGUARDED_CRITICAL_LIVE_SINK is silently dropped to BLUE."""
+    return (getattr(s, "context", "prod") == "prod"
+            and getattr(s, "detection_source", "static") == "static"
+            and getattr(s, "capability", "") in _AMBER_ACTION_CAPS
+            and getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK")
+
+
 # ---- OWASP Risk Rating (Severity x Likelihood -> Low/Med/High). Refs: OWASP Risk Rating Methodology;
 # NIST SP 800-30 Rev.1 (5-level qualitative scales + Risk-Level Matrix); ISO/IEC 27005. (S8.66) ----
 _SEVERITY = {
     "code_exec": 5, "ssti": 5, "deserialize": 5, "subprocess_exec": 5,   # RCE
     "secret-exfil": 4, "secret_exfil": 4,                                 # data breach
+    # high-impact agent-actions (RED band): money-moving / irreversible / message-sending / machine-control
+    "payment": 4, "blockchain_tx": 4, "cloud_write": 4, "file_perms": 4, "email_send": 4, "dm": 4,
+    "telegram_send": 4, "computer_use": 4, "browser_submit": 3,
     "external_write": 3, "file_write": 3, "file_delete": 3, "tool_invoke": 3, "publish_write": 3,
+    # reversible / social agent-actions (AMBER band)
+    "post": 3, "reply": 3, "comment": 2, "like": 2, "browser_click": 2, "browser_type": 2,
     "queue_mutation": 2,
 }
 _RATING_ORDER = {"Low": 0, "Med": 1, "High": 2}
@@ -126,22 +160,28 @@ def install_liability_rating(surfaces) -> dict:
     }
 
 
-def verdict_band(reachable: int, proven: int, install_liab: int) -> dict:
+def verdict_band(reachable: int, proven: int, install_liab: int, amber_actions: int = 0) -> dict:
     """Canonical RED / AMBER / BLUE verdict — the SINGLE source of truth shared by the customer HTML report
     (shield_report.build_html) and the CLI live experience (live_scan). The thresholds must never diverge,
     so both call THIS function:
 
-      RED   ("Action needed")          — a reachable + unguarded live sink (deterministic
-                                          UNGUARDED_CRITICAL_LIVE_SINK) OR a proven-live PoC.
-      AMBER ("Review before you ship") — install-liability only (inert here, live on install).
-      BLUE  ("No live threat proven")  — neither. NOT "secure" / not a clean bill of health.
+      RED   ("Action needed")              — a reachable + unguarded live sink (deterministic
+                                             UNGUARDED_CRITICAL_LIVE_SINK, RCE-class or high-impact action)
+                                             OR a proven-live PoC.
+      AMBER ("Reachable actions — review") — a reachable + unguarded REVERSIBLE/social action (post, like,
+                                             comment ...): live now, but lower blast-radius than the red band.
+      AMBER ("Review before you ship")     — install-liability only (inert here, live on install).
+      BLUE  ("No live threat proven")      — none of the above. NOT "secure" / not a clean bill of health.
 
-    HONESTY INVARIANT: `reachable` MUST be the deterministic static count (non_gated_vulnerable, built from
-    detection_source == "static" surfaces only in build_report). An AI-suspected GUESS is filtered out
-    upstream and can never reach this function, so it can never turn a verdict RED. `code` is the lower-case
-    band; `head` is the base head string (the report renders it as-is; the CLI upper-cases it)."""
+    HONESTY INVARIANT: `reachable` AND `amber_actions` MUST be deterministic static counts
+    (non_gated_vulnerable / reachable_amber_actions, both built from detection_source == "static" surfaces
+    only in build_report). An AI-suspected GUESS is filtered out upstream and can never reach this function,
+    so it can never turn a verdict RED **or** AMBER. `code` is the lower-case band; `head` is the base head
+    string (the report renders it as-is; the CLI upper-cases it)."""
     if proven > 0 or reachable > 0:
         return {"code": "red", "icon": "⚠", "head": "Action needed"}
+    if amber_actions > 0:
+        return {"code": "amber", "icon": "▲", "head": "Reachable actions — review"}
     if install_liab > 0:
         return {"code": "amber", "icon": "▲", "head": "Review before you ship"}
     return {"code": "blue", "icon": "●", "head": "No live threat proven"}
@@ -202,7 +242,7 @@ def build_report(root, scan, validated=None) -> dict:
     proven_counts = {"High": 0, "Med": 0, "Low": 0}
     candidate_high = 0
     for s in surfaces:
-        if s.capability in (_RCE_CAPS | _ACT_CAPS):
+        if s.capability in _VULN_CAPS:   # RCE-class | write/act | high-impact agent-action (the red set)
             poc = _is_validated(s)
             lang = getattr(s, "language", "python")
             if poc:
@@ -230,6 +270,10 @@ def build_report(root, scan, validated=None) -> dict:
     # GATED vulnerable = reachable dangerous sink that a guard/mitigation downgraded (present but protected)
     gated = [s for s in vulnerable if getattr(s, "tainted_reachable", False)
              and getattr(s, "verdict", "") != "UNGUARDED_CRITICAL_LIVE_SINK"]
+    # AMBER reachable actions = reachable + unguarded REVERSIBLE/social actions (post/like/comment ...).
+    # Uses the SHARED is_reachable_amber_action predicate so the report count, the HTML band and the --live
+    # finale can never diverge. Static-only (invariant 3: an AI guess can never drive this band either).
+    amber_actions = [s for s in surfaces if is_reachable_amber_action(s)]
     # language mix + the honesty caveat (guard model is Python-only)
     langs = {}
     for s in surfaces:
@@ -251,7 +295,8 @@ def build_report(root, scan, validated=None) -> dict:
         "coverage_pct": coverage,
         "total_action_surfaces": total,
         "vulnerable_surfaces": len(vulnerable),
-        "non_gated_vulnerable": len(non_gated),          # KICKER: live threat, no guard
+        "non_gated_vulnerable": len(non_gated),          # KICKER: live threat, no guard (RED)
+        "reachable_amber_actions": len(amber_actions),   # reachable+unguarded reversible/social actions (AMBER)
         "gated_vulnerable": len(gated),                  # present but a guard/mitigation protects it
         "proven_live_poc": len(proven_live),             # human-traced + PoC-confirmed subset (never the raw count)
         "install_liability_rce": len(install_liab),      # inert here, live on install
@@ -262,6 +307,7 @@ def build_report(root, scan, validated=None) -> dict:
         "proven_live": {"count": len(proven_live), "items": [_row(s) for s in proven_live]},
         "candidate_critical": {"count": len(candidate_crit), "items": [_row(s) for s in candidate_crit]},
         "non_gated_items": [_row(s) for s in non_gated[:50]],
+        "amber_action_items": [_row(s) for s in amber_actions[:50]],
     }
 
 
@@ -277,6 +323,8 @@ def render(report: dict) -> str:
     L.append(f"- **Repo scanned:** {r['coverage_pct']}% ({r['files_scanned']} files) · guard model: {r['guard_model_note']}")
     L.append(f"- **Total action-surfaces:** {r['total_action_surfaces']} · **vulnerable:** {r['vulnerable_surfaces']}")
     L.append(f"- **Non-gated (live threat):** {r['non_gated_vulnerable']} · **Gated (protected):** {r['gated_vulnerable']}")
+    L.append(f"- **Reachable actions — review (amber):** {r.get('reachable_amber_actions', 0)} — reachable + "
+             f"unguarded reversible/social actions (post/reply/like); lower blast-radius than the red band.")
     L.append("")
     L.append(f"## 🔴 PROVEN-LIVE (human-traced + PoC-confirmed): {r['proven_live']['count']}")
     L.append("Reachable + unguarded HERE now AND empirically proven — we ran the sink with a benign payload.")

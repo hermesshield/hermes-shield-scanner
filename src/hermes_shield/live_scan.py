@@ -108,15 +108,17 @@ def funnel(report: dict, scan: dict) -> dict:
 
 
 def signal_tally(report: dict, scan: dict) -> dict:
-    """The three honest signals. Only `reachable` is ever RED, and only from the deterministic count.
+    """The honest signals. Only `reachable` is ever RED, and only from the deterministic count.
+    `amber_actions` (reachable+unguarded reversible/social actions) drives the AMBER band with install.
     AI-suspected surfaces feed the grey `needs_review` tally exclusively — never red, never amber."""
     reachable = int(report.get("non_gated_vulnerable", 0))
     install = int(report.get("install_liability_rce", 0))
+    amber_actions = int(report.get("reachable_amber_actions", 0))
     ai = sum(1 for s in scan.get("surfaces", [])
              if getattr(s, "detection_source", "static") != "static"
              and getattr(s, "context", "prod") == "prod")
-    return {"reachable": reachable, "install": install, "needs_review": ai,
-            "proven": int(report.get("proven_live_poc", 0))}
+    return {"reachable": reachable, "install": install, "amber_actions": amber_actions,
+            "needs_review": ai, "proven": int(report.get("proven_live_poc", 0))}
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +440,8 @@ def render_finale(report: dict, scan: dict, out_dir, version: str, stream=None):
     colour = _use_colour(stream)
     sig = signal_tally(report, scan)
     reachable, proven, install, ai = sig["reachable"], sig["proven"], sig["install"], sig["needs_review"]
-    vb = _IR.verdict_band(reachable, proven, install)
+    amber_actions = sig["amber_actions"]
+    vb = _IR.verdict_band(reachable, proven, install, amber_actions)
     band_c = {"red": _HEAT, "amber": _A, "blue": _BLU}[vb["code"]]
 
     def w(s):
@@ -461,6 +464,13 @@ def render_finale(report: dict, scan: dict, out_dir, version: str, stream=None):
                          f"code right now, with nothing in the way.") + "\n")
         if proven:
             w("  " + c(_GRY, f"{proven} proven-live — we demonstrated a real attack path.") + "\n")
+    elif vb["code"] == "amber" and amber_actions:
+        w("  " + c(_GRY, f"{amber_actions} reversible {'action an attacker' if amber_actions == 1 else 'actions an attacker'} "
+                         f"can reach here with nothing in the way — social/post-style {'action' if amber_actions == 1 else 'actions'} "
+                         f"(post, reply, like). Lower blast-radius than the red band, but review before you ship.") + "\n")
+        if install:
+            w("  " + c(_GRY, f"Plus {install} install-liability {'item goes' if install == 1 else 'items go'} "
+                             f"live the moment this code is installed and fed untrusted input.") + "\n")
     elif vb["code"] == "amber":
         w("  " + c(_GRY, f"Nothing is reachable here today — but {install} install-liability "
                          f"{'item goes' if install == 1 else 'items go'} live the moment this code is "
@@ -476,6 +486,10 @@ def render_finale(report: dict, scan: dict, out_dir, version: str, stream=None):
     w("      " + c(reach_dot + _B, f"● {reachable}") + " " +
       c(_GRY, "reachable & unguarded") + "  " +
       c(reach_dot, "→ fix these first" if reachable else "→ nothing reachable-unguarded proven") + "\n")
+    amber_dot = _A if amber_actions else _GRY
+    w("      " + c(amber_dot + _B, f"▲ {amber_actions}") + " " + c(_GRY, "reachable actions (review)") + "  " +
+      c(amber_dot, "→ reversible/social — review before you ship" if amber_actions
+        else "→ none reachable") + "\n")
     w("      " + c(_A + _B, f"▲ {install}") + " " + c(_GRY, "install-liability") + "  " +
       c(_A, "→ gate before you ship" if install else "→ none inherited") + "\n")
     w("      " + c(_GRY + _B, f"· {ai}") + " " + c(_GRY, "needs review (AI)") + "  " +
@@ -507,7 +521,7 @@ def render_quiet(report: dict, scan: dict, out_dir, stream=None):
     stream = stream or sys.stdout
     colour = _use_colour(stream)
     sig = signal_tally(report, scan)
-    vb = _IR.verdict_band(sig["reachable"], sig["proven"], sig["install"])
+    vb = _IR.verdict_band(sig["reachable"], sig["proven"], sig["install"], sig["amber_actions"])
     band_c = {"red": _HEAT, "amber": _A, "blue": _BLU}[vb["code"]]
     try:
         rel = os.path.relpath(str(out_dir), os.getcwd())

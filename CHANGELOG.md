@@ -3,6 +3,57 @@
 All notable changes to the Hermes Shield scanner are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [Unreleased] — actions-firewall: reachable agent-action sinks are no longer under-reported
+
+### Changed — VERDICT BEHAVIOUR (intentional core change; output is deliberately NOT byte-identical)
+- **Closed the actions-firewall gap.** `guard_attribution` stamps `UNGUARDED_CRITICAL_LIVE_SINK` onto **any**
+  reachable-from-untrusted, unguarded `CRITICAL_CAPS` surface — which includes the agent-action sinks
+  (`payment`, `email_send`, `dm`, `post`, `like`, …). But `install_report` only counted `_RCE_CAPS | _ACT_CAPS`
+  toward `non_gated_vulnerable`, so a repo whose **only** live sink was, say, a money-moving `payment` or a
+  message-sending `email_send`/`dm` reported **BLUE "no live threat proven"**. That was a *false all-clear*: a
+  hijacked agent could wire an untrusted prompt straight to an irreversible/costly action and the scanner said
+  nothing. **Why it matters:** excessive-agency (OWASP LLM06) is exactly about what a hijacked agent can *do* —
+  the action sinks are the firewall, and they were invisible.
+- **New agreed taxonomy drives the verdict** (both bands static-only, so the Loop-1 invariant holds — an
+  AI-suspected guess can never drive either):
+  - **RED caps** (high-impact / costly / irreversible) now count into `non_gated_vulnerable` and drive the RED
+    **"Action needed"** verdict + the reachable-now table, exactly like an RCE sink:
+    `payment, blockchain_tx, cloud_write, file_perms, email_send, dm, telegram_send, computer_use, browser_submit`
+    (added to `_VULN_CAPS` via a new `_RED_ACTION_CAPS` set feeding `is_non_gated_vulnerable`).
+  - **AMBER caps** (reversible / social) resolve to a **new "Reachable actions — review" AMBER band** —
+    never BLUE, never RED — counted as `reachable_amber_actions` via the new `is_reachable_amber_action`
+    predicate and wired into `verdict_band(..., amber_actions=…)`:
+    `post, reply, comment, like, browser_click, browser_type, queue_mutation`.
+- **`--live` stays consistent** (no Act-1-vs-Act-3 contradiction): the HUD red stream and the finale both use
+  the shared `is_non_gated_vulnerable`; the finale/quiet line and the HTML banner both call the widened
+  `verdict_band` with the amber-actions count and render a dedicated amber "reachable actions" band + plain-
+  words line. The HTML "Reachable in-repo" table and the new amber table **partition** every reachable-
+  unguarded surface — nothing is silently dropped.
+- **Repairer feed corrected:** the newly-counted reachable actions (static only) already flow into
+  `patch_plan.build` / the fix plan via their `UNGUARDED_CRITICAL_LIVE_SINK` verdict; concrete fix-at-source
+  controls were added for each new red/amber cap (spend/recipient allowlists + human approval), so the paid
+  Repairer no longer falls through to the generic fallback for a live action sink.
+- **Repairer feed now shares the report's RED/AMBER partition (cross-surface consistency).** The fix-plan
+  tier (`shield_report._fix_plan_rows`) and the machine Repairer block flag (`patch_plan.build`) were still
+  keyed on a *bare* `verdict == UNGUARDED_CRITICAL_LIVE_SINK` test — which ignores the red-vs-amber capability
+  split. A reachable AMBER action (e.g. a `post` sink) was therefore shown in the RED **"fix first — reachable
+  now"** table (badge `.ff`) and flagged `block_live_promotion=True` in `hermes_patch_plan.json`, while the
+  deterministic banner + "Reachable in-repo" table correctly called it **amber "review before you ship"** — a
+  same-file:line verdict-vs-Repairer-feed contradiction that over-stated an amber social action as red.
+  **Fix:** both now reuse the shared predicates — `is_non_gated_vulnerable` for the red fix-first tier /
+  block flag, `is_reachable_amber_action` routed to a new **"Reachable actions — review before you ship"**
+  fix-plan section (badge `.rv`, never `block_live_promotion`), everything else to the wiring-time tier. Since
+  `guard_attribution` only stamps the verdict onto `CRITICAL_CAPS` (== red ∪ amber caps), the three tiers
+  partition every finding with nothing dropped. Explicit hard-block verdicts (`BLOCK_LIVE_PROMOTION`,
+  `GUARD_LOST`) still block regardless of band. Loop-1 static-only invariant preserved (both predicates gate
+  on `detection_source == "static"`).
+- **Tests:** updated the one test that locked the OLD under-reporting (`post/email_send/payment/dm/blockchain_tx
+  → BLUE`) to assert the NEW correct behaviour (red-caps → RED + reachable table; amber-caps → the amber band);
+  added regression tests for AI-suspected action sinks (still never red/amber), a clean repo (still BLUE), the
+  HTML red/amber banners, and — for the fix-plan/Repairer-feed partition — that an amber action is routed to
+  the review tier (never the red fix-first table) and is never `block_live_promotion`, that a red action still
+  blocks, and that hard-block verdicts still block. Suite: **422 passed**.
+
 ## [0.7.1] — 2026-07-17  ·  FIRST PUBLIC RELEASE (launch-hardening)
 
 ### Changed / Fixed (from an adversarial launch review — no scan-engine change)

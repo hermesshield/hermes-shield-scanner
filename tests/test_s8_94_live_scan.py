@@ -87,6 +87,14 @@ def test_verdict_band_thresholds_match_report():
     assert IR.verdict_band(1, 0, 0)["head"] == "Action needed"
     assert IR.verdict_band(0, 0, 1)["head"] == "Review before you ship"
     assert IR.verdict_band(0, 0, 0)["head"] == "No live threat proven"
+    # ACTIONS-FIREWALL: the new amber-actions band. Reachable reversible/social actions resolve AMBER (a
+    # NEW band), never BLUE — and rank ABOVE install-liability for the head string, BELOW the red set.
+    assert IR.verdict_band(reachable=0, proven=0, install_liab=0, amber_actions=2)["code"] == "amber"
+    assert IR.verdict_band(0, 0, 0, 2)["head"] == "Reachable actions — review"
+    assert IR.verdict_band(0, 0, 5, 2)["head"] == "Reachable actions — review"   # amber-actions win the head
+    assert IR.verdict_band(1, 0, 0, 9)["code"] == "red"                          # red still outranks amber
+    # a repo whose ONLY finding is an amber action is AMBER, not BLUE (the actions-firewall fix)
+    assert IR.verdict_band(0, 0, 0, 1)["code"] == "amber"
 
 
 def test_red_only_from_deterministic_reachable_unguarded(tmp_path):
@@ -118,34 +126,96 @@ def test_ai_suspected_guess_can_never_turn_red_or_amber(tmp_path):
     assert LV._HEAT not in txt  # no earned-red anywhere (colour is off on a non-TTY buffer anyway)
 
 
-@pytest.mark.parametrize("cap", ["post", "email_send", "payment", "dm", "blockchain_tx"])
-def test_live_red_stream_uses_same_predicate_as_report_non_gated(tmp_path, cap):
-    """GUARD-TEAM GAP (invariant #2): guard_attribution writes UNGUARDED_CRITICAL_LIVE_SINK onto ANY
-    prod+static+tainted+unguarded CRITICAL_CAPS surface — a BROADER set than install_report._VULN_CAPS.
-    The report's non_gated_vulnerable only counts _VULN_CAPS, so an agent-action sink (post/email_send/
-    payment/...) that is unguarded resolves the finale to BLUE / 0. The `--live` red stream must NOT flash
-    red for it — Act 1 (HUD) and Act 3 (finale) must agree. Both are driven by the ONE shared predicate
-    install_report.is_non_gated_vulnerable, so this can never diverge."""
-    # a capability outside _VULN_CAPS but which guard_attribution can still stamp UNGUARDED_CRITICAL
-    assert cap not in IR._VULN_CAPS
+# ACTIONS-FIREWALL CHANGE (was: test_live_red_stream_uses_same_predicate_as_report_non_gated).
+# This test USED to lock the OLD under-reporting: an unguarded agent-action sink (post / email_send /
+# payment / dm / ...) was NOT counted by install_report (_VULN_CAPS was RCE|write/act only), so the finale
+# resolved to BLUE "no live threat proven" — the actions-firewall gap. That was a FALSE all-clear: a hijacked
+# agent could wire an untrusted prompt straight to a money-moving / message-sending action. Per the agreed
+# taxonomy the counted set now widens, so the assertions below are UPDATED to the NEW correct behaviour
+# (still driven by the ONE shared predicate, so Act 1 (HUD) and Act 3 (finale) can never diverge).
+
+@pytest.mark.parametrize("cap", ["email_send", "payment", "dm", "blockchain_tx", "telegram_send",
+                                 "cloud_write", "file_perms", "computer_use", "browser_submit"])
+def test_red_action_sink_drives_red_and_is_in_reachable_table(tmp_path, cap):
+    """RED band: a reachable + unguarded HIGH-IMPACT action sink (money / message / machine-control) now
+    drives the RED verdict exactly like an RCE sink, and the shared is_non_gated_vulnerable predicate — the
+    SAME one scan_hermes' live red stream selects with — returns True, so HUD and finale agree."""
+    assert cap in IR._VULN_CAPS and cap in IR._RED_ACTION_CAPS
     s = _surf(cap=cap, verdict="UNGUARDED_CRITICAL_LIVE_SINK", source="static", reachable=True)
     rep, scan = _report([s], root=tmp_path)
 
-    # deterministic report: this cap is NOT a non_gated_vulnerable -> BLUE finale
-    assert rep["non_gated_vulnerable"] == 0
+    # deterministic report: this cap IS a non_gated_vulnerable now -> RED finale, and in the reachable list
+    assert rep["non_gated_vulnerable"] == 1
+    assert rep["reachable_amber_actions"] == 0
+    assert any(it["capability"] == cap for it in rep["non_gated_items"])
     band = IR.verdict_band(rep["non_gated_vulnerable"], rep["proven_live_poc"],
-                           rep["install_liability_rce"])
-    assert band["code"] == "blue"
+                           rep["install_liability_rce"], rep["reachable_amber_actions"])
+    assert band["code"] == "red"
 
-    # the shared predicate (the SAME one scan_hermes' live stream selects red events with) agrees: no red
-    assert IR.is_non_gated_vulnerable(s) is False
+    # the shared predicate agrees -> the live red stream WOULD fire for it
+    assert IR.is_non_gated_vulnerable(s) is True
     live_events = [x for x in scan["surfaces"] if IR.is_non_gated_vulnerable(x)]
-    assert live_events == []
+    assert live_events == [s]
 
-    # and the rendered finale never shows earned-red for it
+
+@pytest.mark.parametrize("cap", ["post", "reply", "comment", "like", "browser_click", "browser_type",
+                                 "queue_mutation"])
+def test_amber_action_sink_drives_amber_band_not_blue_not_red(tmp_path, cap):
+    """AMBER band: a reachable + unguarded REVERSIBLE/social action (post / like / comment ...) must resolve
+    the verdict to the NEW 'reachable actions — review' AMBER band — never BLUE (silently dropped), never
+    RED. It counts as reachable_amber_actions, NOT non_gated_vulnerable."""
+    assert cap in IR._AMBER_ACTION_CAPS and cap not in IR._VULN_CAPS
+    s = _surf(cap=cap, verdict="UNGUARDED_CRITICAL_LIVE_SINK", source="static", reachable=True)
+    rep, scan = _report([s], root=tmp_path)
+
+    assert rep["non_gated_vulnerable"] == 0          # NOT red
+    assert rep["reachable_amber_actions"] == 1       # counted in the amber band
+    assert any(it["capability"] == cap for it in rep["amber_action_items"])
+    assert IR.is_reachable_amber_action(s) is True
+    assert IR.is_non_gated_vulnerable(s) is False     # never red-driving
+
+    band = IR.verdict_band(rep["non_gated_vulnerable"], rep["proven_live_poc"],
+                           rep["install_liability_rce"], rep["reachable_amber_actions"])
+    assert band["code"] == "amber"                    # not blue
+    assert band["head"] == "Reachable actions — review"
+
+    # the finale never shows earned-red for an amber action, and the amber head is rendered
     buf = io.StringIO()
     LV.render_finale(rep, scan, tmp_path / "o", "0.0-test", stream=buf)
-    assert LV._HEAT not in buf.getvalue()
+    txt = buf.getvalue()
+    assert LV._HEAT not in txt
+    assert "REACHABLE ACTIONS — REVIEW" in txt
+
+
+def test_ai_suspected_action_sink_can_never_drive_red_or_amber(tmp_path):
+    """Loop-1 invariant on BOTH new bands: the SAME reachable+unguarded action shape but detection_source
+    != 'static' is filtered out of the deterministic headline — it can drive neither the red set nor the new
+    amber band. It shows only in the grey needs-review tally."""
+    for cap in ("payment", "post"):   # one red-band cap, one amber-band cap
+        s = _surf(cap=cap, verdict="UNGUARDED_CRITICAL_LIVE_SINK", source="ai_suspected", reachable=True)
+        rep, scan = _report([s], root=tmp_path)
+        assert rep["non_gated_vulnerable"] == 0
+        assert rep["reachable_amber_actions"] == 0
+        assert IR.is_non_gated_vulnerable(s) is False
+        assert IR.is_reachable_amber_action(s) is False
+        band = IR.verdict_band(rep["non_gated_vulnerable"], rep["proven_live_poc"],
+                               rep["install_liability_rce"], rep["reachable_amber_actions"])
+        assert band["code"] == "blue"
+        tally = LV.signal_tally(rep, scan)
+        assert tally["needs_review"] == 1 and tally["reachable"] == 0 and tally["amber_actions"] == 0
+
+
+def test_clean_repo_still_blue_with_new_action_bands(tmp_path):
+    """Regression: the actions-firewall widening must not over-fire. A repo whose action sinks are all
+    READ_ONLY / non-reachable has neither a red nor an amber-action finding — it stays BLUE (never a clean
+    bill of health, but no live threat proven)."""
+    clean = [_surf(cap=c, verdict="READ_ONLY_SURFACE", reachable=False, symbol=f"s{i}")
+             for i, c in enumerate(["post", "payment", "like", "email_send", "dm"])]
+    rep, scan = _report(clean, root=tmp_path)
+    assert rep["non_gated_vulnerable"] == 0 and rep["reachable_amber_actions"] == 0
+    band = IR.verdict_band(rep["non_gated_vulnerable"], rep["proven_live_poc"],
+                           rep["install_liability_rce"], rep["reachable_amber_actions"])
+    assert band["code"] == "blue"
 
 
 def test_shared_predicate_still_reds_a_genuine_rce_sink(tmp_path):

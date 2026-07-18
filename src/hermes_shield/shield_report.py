@@ -102,12 +102,19 @@ def _fix_plan_rows(rows):
     no-op / fail-open) findings get a suggestion — see _FIX_CATS. UNPROVEN / GATE_UNVERIFIED are excluded on
     purpose.
 
-    ONE TIER PER FINDING (P0.1): each row carries its REAL reachability tier, derived from the SAME rule the
-    headline "reachable" stat uses (verdict == UNGUARDED_CRITICAL_LIVE_SINK):
-      - reachable-in-repo            -> fix first, with the fix-at-source recommended_control();
-      - everything else (inert here) -> wiring-time — gate on install, with wiring_control() guidance.
-        Never presented as "fix first / reachable", so the fix plan can no longer contradict the
-        install-liability table for the same file:line.
+    ONE TIER PER FINDING (P0.1), derived from the SAME shared predicates (install_report) that the banner,
+    the "Reachable in-repo" red table and the amber "Reachable actions" band use — NOT a bare verdict test.
+    This is the whole point: a bare `verdict == UNGUARDED_CRITICAL_LIVE_SINK` test does NOT honour the
+    RED-vs-AMBER capability partition, so an AMBER social action (post/reply/like) carrying that verdict was
+    wrongly shown in the RED "fix first — reachable now" table while the deterministic banner + red reachable
+    table correctly called it amber — a same-file:line verdict-vs-fix-plan contradiction. The three tiers
+    PARTITION every finding exactly as the report does:
+      - red   (IR.is_non_gated_vulnerable)   -> reachable-in-repo, fix first (fix-at-source control);
+      - amber (IR.is_reachable_amber_action) -> reachable action, review before you ship — reversible/social,
+        lower blast-radius than the red band; still a fix-at-source control, never "fix first / reachable now";
+      - else  (inert here)                   -> wiring-time — gate on install, with wiring_control() guidance.
+    Because guard_attribution only stamps UNGUARDED_CRITICAL_LIVE_SINK onto CRITICAL_CAPS (== red ∪ amber
+    caps), no reachable-unguarded finding is silently dropped between these tiers.
     The scanner PLANS these; it does NOT modify code (status = 'PLANNED — not applied')."""
     from . import patch_plan as _PP
     out = []
@@ -119,16 +126,25 @@ def _fix_plan_rows(rows):
         if cat not in _FIX_CATS:
             continue
         cap = s.capability
-        reach = getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK"
+        if IR.is_non_gated_vulnerable(s):          # RED — reachable + unguarded, high blast-radius
+            band, tier, reachable = "red", "reachable-in-repo", True
+            control = _PP.recommended_control(cap)
+        elif IR.is_reachable_amber_action(s):      # AMBER — reachable + unguarded, reversible/social
+            band, tier, reachable = "amber", "reachable action — review before you ship", True
+            control = _PP.recommended_control(cap)
+        else:                                      # inert here — gate at wiring time, not a fix-now item
+            band, tier, reachable = "wiring", "wiring-time — gate on install", False
+            control = _PP.wiring_control(cap)
         out.append({
             "file": s.file_path,
             "line": s.line_start,
             "capability": cap,
             "cap_label": _CAP_LABEL.get(cap, cap),
-            "reachable": reach,
-            "tier": "reachable-in-repo" if reach else "wiring-time — gate on install",
+            "reachable": reachable,
+            "band": band,
+            "tier": tier,
             "category": cat,
-            "recommended_control": _PP.recommended_control(cap) if reach else _PP.wiring_control(cap),
+            "recommended_control": control,
             "status": _FIX_STATUS,
         })
     return out
@@ -197,7 +213,7 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
 ## Summary
 - **Dangerous action-surfaces discovered:** {m['total']}
 - **Have a control (present, unverified):** {m['gated']}  ({m['coverage_pct']}% coverage)
-- **NO control found:** {m['no_gate']}  (each fix-plan item below carries its real tier — fix-first vs wiring-time)
+- **NO control found:** {m['no_gate']}  (each fix-plan item below carries its real tier — fix-first, reachable-action review, or wiring-time)
 - **Gate looks FAKE (no-op / fail-open):** {m['fake']}
 - **AI-suspected surfaces (model-proposed, review):** {len(ai)}
 - **Install-liability (RCE-class inherited):** {_install_liab}  ·  inherited rating: {_install_band}
@@ -280,6 +296,7 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         _ir = {}
     reachable = _ir.get("non_gated_vulnerable", m["no_gate"])
     install_liab = _ir.get("install_liability_rce", 0)
+    amber_actions = _ir.get("reachable_amber_actions", 0)
     proven = _ir.get("proven_live_poc", 0)
     band = (_ir.get("install_liability_rating") or {}).get("band", "Low")
     overall = _ir.get("overall_rating", "None (no proven-live)")
@@ -301,7 +318,7 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     # (install-liability only), CALM BLUE (neither). Blue is "no live threat PROVEN", never "secure".
     # CANONICAL verdict — shared with the CLI (install_report.verdict_band) so the HTML banner and the CLI
     # can never disagree. This chooses the band/icon/head; the human-facing sub-copy is built per-band below.
-    _vb = IR.verdict_band(reachable, proven, install_liab)
+    _vb = IR.verdict_band(reachable, proven, install_liab, amber_actions)
     b_cls, b_icon, b_head = _vb["code"], _vb["icon"], _vb["head"]
     if proven > 0 or reachable > 0:
         n = reachable if reachable else proven
@@ -310,6 +327,13 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         if proven:
             b_sub += (f" <b>{proven}</b> {_pl(proven, 'is', 'are')} proven-live — we demonstrated a real "
                       f"attack path.")
+    elif amber_actions > 0:
+        b_sub = (f"<b>{amber_actions} reversible {_pl(amber_actions, 'action', 'actions')}</b> "
+                 f"(post, reply, like) an attacker can reach here with nothing in the way — lower "
+                 f"blast-radius than the red band, but review before you ship.")
+        if install_liab:
+            b_sub += (f" Plus <b>{install_liab}</b> install-liability {_pl(install_liab, 'item', 'items')} "
+                      f"that {_pl(install_liab, 'goes', 'go')} live on install.")
     elif install_liab > 0:
         b_sub = (f"<b>{install_liab} dangerous {_pl(install_liab, 'capability is', 'capabilities are')}</b> "
                  f"inert here but {_pl(install_liab, 'goes', 'go')} live the moment this code is installed "
@@ -327,6 +351,11 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
                      f"use {_pl(n, 'it', 'them')} today.")
         pw_do = ("<b>Work the fix plan below, top to bottom</b> — the items marked "
                  "“reachable now — fix first” come first.")
+    elif amber_actions > 0:
+        pw_urgent = (f"<b>{amber_actions} reversible {_pl(amber_actions, 'action is', 'actions are')} "
+                     f"reachable with no control</b> — a hijacked agent could post, reply or like as you "
+                     f"today. Lower blast-radius than the red band, but not nothing.")
+        pw_do = ("<b>Review the “reachable actions” band below</b> and gate each one before you ship.")
     elif install_liab > 0:
         pw_urgent = (f"<b>Nothing is reachable right now</b> — but {install_liab} install-liability "
                      f"{_pl(install_liab, 'item', 'items')} (dangerous capability that's harmless here but "
@@ -346,9 +375,14 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     # drive the red banner or the reachable table even if a future path re-stamps its verdict.
     def _is_static(s):
         return getattr(s, "detection_source", "static") == "static"
-    live = [s for s in scan["surfaces"]
-            if getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK" and _is_static(s)]
-    live_ids = {id(s) for s in live}
+    # The reachable-unguarded surfaces PARTITION into the red-driving set (is_non_gated_vulnerable: RCE-class
+    # + high-impact actions) and the amber action band (is_reachable_amber_action: reversible/social). The
+    # union is exactly every prod+static UNGUARDED_CRITICAL_LIVE_SINK — nothing is silently dropped to BLUE.
+    live = [s for s in scan["surfaces"] if IR.is_non_gated_vulnerable(s)]
+    amber_live = [s for s in scan["surfaces"] if IR.is_reachable_amber_action(s)]
+    # everything reachable-unguarded (both bands) — the id set the install-liability table must exclude
+    live_ids = {id(s) for s in scan["surfaces"]
+                if getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK" and _is_static(s)}
     il = [s for s in scan["surfaces"] if s.context == "prod" and s.capability in _RCE
           and _is_static(s) and id(s) not in live_ids]
 
@@ -367,11 +401,14 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         return "".join(out) or "<tr><td colspan=3 class=more>(none)</td></tr>"
 
     # Fix plan — generated, not applied. NO_GATE + FAKE_GATE only (see _fix_plan_rows scope). Split by the
-    # row's REAL tier (P0.1): reachable-now rows get the fix-first treatment; everything else gets the
-    # SEPARATE wiring-time treatment — one classification, one story per finding.
+    # row's REAL band (P0.1) — the SAME red/amber/wiring partition as the banner + reachable tables, so a
+    # finding tells ONE story everywhere: red -> fix first; amber -> reachable action, review before ship;
+    # wiring -> gate on install. The red table therefore holds ONLY is_non_gated_vulnerable surfaces,
+    # matching its "same reachable-unguarded rule as the Reachable in-repo count" claim below.
     _fixrows = _fix_plan_rows(m["rows"])
-    _fix_reach = [it for it in _fixrows if it["reachable"]]
-    _fix_wiring = [it for it in _fixrows if not it["reachable"]]
+    _fix_reach = [it for it in _fixrows if it["band"] == "red"]
+    _fix_amber = [it for it in _fixrows if it["band"] == "amber"]
+    _fix_wiring = [it for it in _fixrows if it["band"] == "wiring"]
 
     def fixplan_rows(items, badge, empty, limit=30):
         out = []
@@ -392,6 +429,18 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     fixplan_reach_html = fixplan_rows(
         _fix_reach, "<span class='badge ff'>reachable now — fix first</span>",
         "(none — nothing reachable-unguarded to fix first)")
+    # AMBER fix-plan band — reachable + unguarded REVERSIBLE/social actions (post/reply/like). Rendered as a
+    # SEPARATE section so an amber action is never shown under the red "fix first — reachable now" table (the
+    # verdict-vs-fix-plan contradiction this partition closes). Only shown when present.
+    fixplan_amber_block = "" if not _fix_amber else (
+        "<h3>Reachable actions — review before you ship "
+        "<span class=c>— reversible/social (post, reply, like); lower blast-radius than fix-first</span></h3>"
+        "<div class=tier>These are <b>reachable and unguarded now</b>, but reversible or social — a hijacked "
+        "agent could post, reply or like as you. Lower blast-radius than the red fix-first band above; "
+        "<b>review and gate each one before you ship</b> — not flagged “fix first”.</div>"
+        f"<table>{_fixhead}" + fixplan_rows(
+            _fix_amber, "<span class='badge rv'>reachable — review before ship</span>", "(none)")
+        + "</table>")
     fixplan_wiring_block = "" if not _fix_wiring else (
         "<h3>Gate on install — wiring-time <span class=c>— inert here, not a fix-now item</span></h3>"
         "<div class=tier>These are <b>not reachable in this repo today</b>, so they are never labelled "
@@ -407,6 +456,16 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         f"<div class=bar><span class=bl>{esc(_CAP_LABEL.get(c, c))}</span>"
         f"<span class=track><span class=fill style='width:{max(3, 100 * n // maxc)}%'></span></span>"
         f"<span class=bn>{n:,}</span></div>" for c, n in bycap.items())
+
+    # ---- AMBER band: reachable + unguarded REVERSIBLE/social actions (post/reply/like ...). A clear NEW
+    # band — never folded into the red table, never silently dropped to BLUE. Rendered only when present.
+    amber_band_html = "" if not amber_live else (
+        "<h2>▸ Reachable actions — review "
+        "<span class=c>— live now, reversible/social (post, reply, like)</span></h2>"
+        "<div class=tier>An untrusted input can reach these actions with no control in the way today. They "
+        "are <b>reversible or social</b> — lower blast-radius than the red “Reachable in-repo” band above, "
+        "but a hijacked agent could still post, reply or like as you. <b>Review and gate each one before you "
+        f"ship.</b></div><table>{rows(amber_live)}</table>")
 
     band_class = {"Low": "lo", "Med": "md", "High": "hi"}.get(band, "lo")
     fonts = _font_face_css()
@@ -509,6 +568,7 @@ background:var(--panel2)}}
 .badge{{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.05em;
 text-transform:uppercase;padding:3px 9px;border-radius:999px;white-space:nowrap}}
 .badge.ff{{color:var(--heat);border:1px solid rgba(255,67,1,.5);background:rgba(255,67,1,.1)}}
+.badge.rv{{color:var(--blaze);border:1px solid rgba(250,125,9,.5);background:rgba(250,125,9,.1)}}
 .badge.wt{{color:var(--blaze);border:1px solid rgba(250,125,9,.5);background:rgba(250,125,9,.1)}}
 /* ---- the Repairer CTA ---- */
 .cta{{background:linear-gradient(135deg,rgba(250,125,9,.16),rgba(255,67,1,.06));
@@ -577,6 +637,8 @@ executed · the deterministic core makes no network calls (optional --ai/--deps 
 <div class=tier>An untrusted input can reach these dangerous actions with no control in the way, today.</div>
 <table>{rows(live)}</table>
 
+{amber_band_html}
+
 <h2>▸ Fix plan <span class=c>— generated, not applied</span></h2>
 <div class=tier>Suggested fix-at-source controls for the confirmed no-control / fake-gate findings.
 <b>The scanner plans these; it does not modify your code.</b> The Hermes Shield Repairer — the paid tier,
@@ -584,6 +646,7 @@ in early access — is being built to apply these under a human gate — never a
 is guidance you apply and review.</div>
 <h3>Fix first — reachable now <span class=c>— {len(_fix_reach)} {_pl(len(_fix_reach), 'item', 'items')} · classified by the same reachable-unguarded rule as the “Reachable in-repo” count above</span></h3>
 <table>{_fixhead}{fixplan_reach_html}</table>
+{fixplan_amber_block}
 {fixplan_wiring_block}
 
 <div class=cta>

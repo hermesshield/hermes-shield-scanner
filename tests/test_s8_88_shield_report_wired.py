@@ -49,6 +49,30 @@ def test_report_carries_honest_caveats_verbatim():
     assert "Hermes Shield" in SR.build_html(scan, "demo")
 
 
+def test_html_red_action_sink_drives_red_banner_and_reachable_table():
+    """ACTIONS-FIREWALL: a reachable + unguarded HIGH-IMPACT action (email_send) now drives the RED banner
+    and appears in the 'Reachable in-repo' table — no longer silently BLUE."""
+    scan = {"surfaces": [_surf("email_send", "UNGUARDED_CRITICAL_LIVE_SINK")],
+            "files_scanned": 1, "ai_tier_counts": {}}
+    html = SR.build_html(scan, "demo")
+    assert 'class="banner red"' in html
+    assert "Action needed" in html
+    # the sink is listed in the reachable table (its capability label is rendered)
+    assert "email_send" in html or "Send email" in html
+
+
+def test_html_amber_action_sink_drives_amber_band_never_blue():
+    """ACTIONS-FIREWALL: a reachable + unguarded REVERSIBLE/social action (post) drives the NEW amber
+    'Reachable actions — review' band — an amber banner and a dedicated section, never the BLUE all-clear."""
+    scan = {"surfaces": [_surf("post", "UNGUARDED_CRITICAL_LIVE_SINK")],
+            "files_scanned": 1, "ai_tier_counts": {}}
+    html = SR.build_html(scan, "demo")
+    assert 'class="banner amber"' in html
+    assert 'class="banner blue"' not in html
+    assert "Reachable actions — review" in html         # the new band heading
+    assert "reversible/social" in html
+
+
 def test_scan_emits_customer_report(tmp_path):
     target = tmp_path / "mini"
     target.mkdir()
