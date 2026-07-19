@@ -299,6 +299,75 @@ def run_scan(root: Path, progress=None, out_dir=None):
         except Exception as e:
             scan["ai_tier_counts"] = {"ai_error": str(e)[:200]}
 
+    # S7.4: whole-repo AGENTIC AI FINDER — flag-gated (HERMES_SHIELD_AI_FINDER=1 / --ai-deep), opt-in and
+    # SEPARATE from the per-file AI tier above. The best model reads ACROSS the repo via READ-ONLY agentic
+    # tools (claude -p --allowedTools Read,Grep,Glob), seeded by repo_map + the static surfaces
+    # (diff-against-static), to find the agent-plumbing surfaces static structurally misses. Every proposed
+    # finding is put through ai_verify (the SAME AST gate as the per-file tier — AI proposes, deterministic
+    # disposes) and only AST-verified survivors are appended, as ADVISORY ai_suspected surfaces:
+    # detection_source="ai_suspected", verdict="AI_SUSPECTED_REVIEW", deduped by stable_id + line against the
+    # static + per-file-AI surfaces already present (never double-report a sink another tier has). The
+    # verdict-restoration loop below then re-stamps EVERY non-static surface to AI_SUSPECTED_REVIEW, so a
+    # finder surface can NEVER acquire a deterministic band-driving verdict. Off by default => byte-identical.
+    scan["ai_finder"] = {}
+    if os.getenv("HERMES_SHIELD_AI_FINDER") == "1":
+        try:
+            from . import ai_finder
+            from .models import ActionSurface
+            # DEDUP identity: every stable_id already present (static uses <symbol>, per-file AI uses <ai>),
+            # plus per-file line sets — a finder finding within 2 lines of an existing surface is the same
+            # sink and is dropped (mirrors the per-file tier's line-proximity dedup against static).
+            _seen_stable = {getattr(s, "stable_id", "") for s in scan["surfaces"]}
+            _seen_stable.discard("")
+            _existing_lines: dict = {}
+            for s in scan["surfaces"]:
+                _existing_lines.setdefault(s.file_path, set()).update(
+                    range(s.line_start, (s.line_end or s.line_start) + 1))
+            result = ai_finder.find(root, static_surfaces=scan["surfaces"])
+            _fadded = _fdeduped = 0
+            for f in result.get("verified", []):
+                rel = f.get("file")
+                if not rel:
+                    continue
+                ln = int(f.get("line", 0) or 0)
+                cap = str(f.get("capability", "ai_flagged"))[:40]
+                sink = str(f.get("call", ""))[:80]
+                stable_id = f"{rel}::<ai-finder>::{cap}::{sink}"
+                if stable_id in _seen_stable or \
+                        any(abs(ln - el) <= 2 for el in _existing_lines.get(rel, ())):
+                    _fdeduped += 1
+                    continue
+                _seen_stable.add(stable_id)
+                _existing_lines.setdefault(rel, set()).add(ln)
+                surf = ActionSurface(
+                    id=f"aifinder::{rel}::{ln}",
+                    file_path=rel, line_start=ln, line_end=ln,
+                    symbol="", capability=cap, context=repo_scanner._context(rel),
+                    sink_name=sink,
+                    detection_source="ai_suspected", verdict="AI_SUSPECTED_REVIEW",
+                    ai_confidence=float(f.get("confidence", 0.0) or 0.0),
+                )
+                surf.stable_id = stable_id
+                scan["surfaces"].append(surf)
+                _fadded += 1
+            # ADVISORY-ONLY GUARANTEE: re-stamp EVERY non-static surface (per-file AI + finder) back to the
+            # advisory verdict — belt-and-braces so no finder surface can ever hold a deterministic verdict.
+            for s in scan["surfaces"]:
+                if getattr(s, "detection_source", "static") != "static":
+                    s.verdict = "AI_SUSPECTED_REVIEW"
+                    s.live_promotion_verdict = "REVIEW"
+            scan["ai_finder"] = {"ai_finder_model": result.get("model"),
+                                 "ai_finder_proposed": result.get("n_proposed"),
+                                 "ai_finder_verified": result.get("n_verified"),
+                                 "ai_finder_added": _fadded,
+                                 "ai_finder_deduped": _fdeduped,
+                                 "ai_finder_fabrication_rate": result.get("fabrication_rate"),
+                                 "ai_finder_status": "ok"}
+        except Exception as e:
+            # FAIL-LOUD tier status, FAIL-OPEN scan: a broken/absent finder backend raises AIAgentError. We
+            # record a VISIBLE failed status (never a silent zero) and let the deterministic scan complete.
+            scan["ai_finder"] = {"ai_finder_status": "failed", "ai_finder_error": str(e)[:200]}
+
     # S8.90: dependency-aware tier — flag-gated (HERMES_SHIELD_DEPS=1), network, opt-in. Fetches the repo's
     # OWN pinned first-party packages (never third-party), scans capability packages with this same engine,
     # and reports their findings in a SEPARATE `install-inherited-via-dependency` tier — never merged into
@@ -359,7 +428,18 @@ def main(argv=None):
     # off a TTY it emits stderr checkpoints and leaves stdout clean.
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--quiet", action="store_true")
+    # S7.4: opt-in WHOLE-REPO agentic AI finder (SEPARATE from the per-file AI tier / HERMES_SHIELD_AI_TIER).
+    # Reads ACROSS the repo via the agentic claude CLI to surface agent-plumbing static misses; findings are
+    # AST-verified + appended as ADVISORY ai_suspected surfaces, never in the deterministic headline. OFF by
+    # default => byte-identical scan. Equivalent to env HERMES_SHIELD_AI_FINDER=1.
+    ap.add_argument("--ai-deep", dest="ai_deep", action="store_true",
+                    help="run the whole-repo agentic AI finder (advisory ai_suspected surfaces; needs the "
+                         "claude CLI). Off by default. Env: HERMES_SHIELD_AI_FINDER=1.")
     args = ap.parse_args(argv)
+
+    # --ai-deep is sugar for the env gate run_scan reads, so the finder wiring stays in one place.
+    if getattr(args, "ai_deep", False):
+        os.environ["HERMES_SHIELD_AI_FINDER"] = "1"
 
     root = Path(args.root).resolve() if args.root else current_repo_root()
     out_dir, baseline_path = resolve_out_paths(root, args.out)

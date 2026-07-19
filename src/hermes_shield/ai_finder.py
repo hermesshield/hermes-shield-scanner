@@ -14,12 +14,14 @@ in the autoresearch loop; the winner becomes the default.
 from __future__ import annotations
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional
 
 from . import repo_map as RM
 from . import ai_verify
+from .ai_assist import AIAgentError
 
 _SYSTEM = '''You are a security auditor finding DANGEROUS ACTION-SURFACES in an AI-agent codebase — calls a
 prompt-injected agent could be tricked into abusing: execute code/commands (eval/exec/subprocess/shell),
@@ -58,13 +60,30 @@ def _static_summary(static_surfaces) -> str:
 
 
 def _finder_agent(model: str, timeout: int):
-    """Agentic backend via the local claude CLI with READ-ONLY tools, CWD scoped to the target repo."""
+    """Agentic backend via the local claude CLI with READ-ONLY tools, CWD scoped to the target repo.
+
+    FAIL-LOUD (mirrors ai_assist.claude_agent): the executable is resolved via shutil.which (so `claude.cmd`
+    on Windows actually launches) and every failure raises AIAgentError with a human-readable reason — never
+    a silent "". The old `except Exception: return ""` made a broken/absent backend look like "AI ran and
+    found nothing", which is the exact silent-zero antipattern the finder must not have: nothing found and
+    backend-broken are different truths and the operator must be told which one occurred."""
     def run(prompt: str, cwd: str) -> str:
-        cmd = ["claude", "-p", prompt, "--model", model, "--allowedTools", "Read,Grep,Glob"]
+        exe = shutil.which("claude")
+        if not exe:
+            raise AIAgentError("claude CLI not found on PATH — install it, or pass a custom finder agent")
+        cmd = [exe, "-p", prompt, "--model", model, "--allowedTools", "Read,Grep,Glob"]
         try:
-            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd).stdout or ""
-        except Exception:
-            return ""
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=timeout, cwd=cwd)
+        except subprocess.TimeoutExpired:
+            raise AIAgentError(f"claude finder CLI timed out after {timeout}s")
+        except Exception as e:
+            raise AIAgentError(f"claude finder CLI failed to launch: {e.__class__.__name__}: {e}")
+        if proc.returncode != 0 and not (proc.stdout or "").strip():
+            tail = (proc.stderr or "").strip().splitlines()
+            detail = tail[-1][:160] if tail else "no output"
+            raise AIAgentError(f"claude finder CLI exited {proc.returncode}: {detail}")
+        return proc.stdout or ""
     return run
 
 
