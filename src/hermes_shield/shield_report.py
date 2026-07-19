@@ -48,6 +48,13 @@ _FIX_CATS = ("NO_GATE", "FAKE_GATE")
 _FIX_STATUS = "PLANNED — not applied"
 
 
+def _sink_ln(s) -> int:
+    """Cite the SINK line (the dangerous call), matching hermes_shield_report.json's `line`. line_start is
+    the enclosing def line — citing it points a reader at `def shell_tool(` not the `subprocess.run(` call.
+    Falls back to line_start only when the scanner recorded no distinct sink line."""
+    return getattr(s, "sink_line", 0) or getattr(s, "line_start", 0)
+
+
 def _category(s) -> str:
     v, proven = s.verdict, s.guard_proof.get("status") == "proven"
     if v in _FAKE_GATE:
@@ -84,10 +91,31 @@ def _report_model(scan, repo_name: str) -> dict:
     fake = cats["FAKE_GATE"]
     ai_rows = [s for s in scan["surfaces"]
                if s.context == "prod" and getattr(s, "detection_source", "static") != "static"]
+    # REVIEW-MANUALLY rows (count-reconciliation fix): a prod, STATIC surface whose capability is NOT in the
+    # critical set (e.g. dynamic_dispatch, verdict REVIEW) was silently dropped from every rendered section
+    # while still counted in the HTML "N mapped" headline — headline != body. Capture it here, deduped the
+    # same way, so it lands in a visible "mapped — review manually" section and the counts reconcile.
+    review_seen, review_rows = set(), []
+    for s in scan["surfaces"]:
+        if s.context != "prod" or getattr(s, "detection_source", "static") != "static":
+            continue
+        if s.capability in _CRIT:
+            continue
+        k = (s.file_path, s.symbol, s.capability)
+        if k in review_seen:
+            continue
+        review_seen.add(k)
+        review_rows.append(s)
     by_cap = Counter(s.capability for s, _ in static_rows)
+    # MAPPED = every distinct deterministic (prod+static) surface the body renders: critical rows + review-
+    # manually rows. This is the ONE headline number the HTML "N mapped" and the MD top-line both use, so
+    # they can never disagree and nothing mapped is silently dropped. AI-suspected surfaces are advisory and
+    # counted separately (never folded into this deterministic total).
+    mapped = total + len(review_rows)
     return {
         "repo": repo_name, "files_scanned": scan["files_scanned"],
         "total": total, "gated": gated, "no_gate": no_gate, "fake": fake,
+        "mapped": mapped, "review_rows": review_rows,
         "coverage_pct": (100 * gated // total) if total else 0,
         "by_capability": dict(by_cap.most_common()),
         "rows": static_rows, "ai_rows": ai_rows,
@@ -95,7 +123,7 @@ def _report_model(scan, repo_name: str) -> dict:
     }
 
 
-def _fix_plan_rows(rows):
+def _fix_plan_rows(rows, scan=None):
     """Build the GENERATED fix plan from categorised report rows [(surface, category)].
 
     HARD SCOPE: only NO_GATE (no proven/reviewed control) and FAKE_GATE (control present but a demonstrable
@@ -117,6 +145,14 @@ def _fix_plan_rows(rows):
     caps), no reachable-unguarded finding is silently dropped between these tiers.
     The scanner PLANS these; it does NOT modify code (status = 'PLANNED — not applied')."""
     from . import patch_plan as _PP
+    # Reachability-unknown context: an "inert here" row can only honestly be called wiring-time when the repo
+    # exposes NO untrusted ingress and NO unresolved dynamic dispatch. If either is present, an RCE-class sink
+    # with no traced caller is REACHABILITY-UNKNOWN, not "inert here" — never label an analysis limit inert.
+    _RCE = {"code_exec", "deserialize", "subprocess_exec", "ssti"}
+    _has_ingress = bool(scan and IR._repo_has_untrusted_ingress(scan))
+    _has_dispatch = bool(scan and IR._repo_has_unresolved_dispatch(
+        [s for s in scan.get("surfaces", []) if getattr(s, "context", "prod") == "prod"
+         and getattr(s, "detection_source", "static") == "static"]))
     out = []
     for s, cat in rows:
         # AI-suspected surfaces (model GUESSES) never generate a fix-plan / Repairer-feed row. Callers pass
@@ -132,12 +168,17 @@ def _fix_plan_rows(rows):
         elif IR.is_reachable_amber_action(s):      # AMBER — reachable + unguarded, reversible/social
             band, tier, reachable = "amber", "reachable action — review before you ship", True
             control = _PP.recommended_control(cap)
+        elif cap in _RCE and (getattr(s, "tainted_reachable", False) or _has_ingress or _has_dispatch):
+            # REACHABILITY-UNKNOWN — could NOT be proven inert (ingress / unresolved dispatch present). Never
+            # "inert here / gate on install"; verify reachability first, then apply the real fix-at-source.
+            band, tier, reachable = "reach-unknown", "reachability unknown — verify, then gate", False
+            control = "Reachability not proven (untrusted ingress / unresolved dispatch present) — trace from the ingress first. " + _PP.recommended_control(cap)
         else:                                      # inert here — gate at wiring time, not a fix-now item
             band, tier, reachable = "wiring", "wiring-time — gate on install", False
             control = _PP.wiring_control(cap)
         out.append({
             "file": s.file_path,
-            "line": s.line_start,
+            "line": _sink_ln(s),
             "capability": cap,
             "cap_label": _CAP_LABEL.get(cap, cap),
             "reachable": reachable,
@@ -158,8 +199,15 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
     rows = m["rows"]
 
     def _list(cat, limit=40):
-        items = [f"- `{s.file_path}:{s.line_start}`  **{s.capability}**  ({s.symbol or 'module-scope'})"
+        items = [f"- `{s.file_path}:{_sink_ln(s)}`  **{s.capability}**  ({s.symbol or 'module-scope'})"
                  for s, c in rows if c == cat]
+        extra = f"\n- …and {len(items) - limit} more" if len(items) > limit else ""
+        return ("\n".join(items[:limit]) + extra) if items else "- (none)"
+
+    def _review_list(limit=40):
+        items = [f"- `{s.file_path}:{_sink_ln(s)}`  **{s.capability}**  ({s.symbol or 'module-scope'})  "
+                 f"_(below the critical-capability line — verify manually)_"
+                 for s in m.get("review_rows", [])]
         extra = f"\n- …and {len(items) - limit} more" if len(items) > limit else ""
         return ("\n".join(items[:limit]) + extra) if items else "- (none)"
 
@@ -170,11 +218,12 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
         _install_liab = _ir.get("install_liability_rce", 0)
         _install_band = _ir.get("install_liability_rating", {}).get("band", "Low")
         _proven = _ir.get("proven_live_poc", 0)
+        _reach_unknown = _ir.get("reachability_unknown", 0)
     except Exception:
-        _install_liab, _install_band, _proven = 0, "Low", 0
+        _install_liab, _install_band, _proven, _reach_unknown = 0, "Low", 0, 0
 
     # Fix plan — generated, not applied. NO_GATE + FAKE_GATE only (see _fix_plan_rows scope).
-    _fixrows = _fix_plan_rows(rows)
+    _fixrows = _fix_plan_rows(rows, scan)
 
     def _fix_md(limit=30):
         if not _fixrows:
@@ -193,7 +242,7 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
     disc = "\n".join(f"- **{cap}** — {n}" for cap, n in m["by_capability"].items()) or "- (none)"
     ai = m["ai_rows"]
     ai_block = ("\n".join(
-        f"- `{s.file_path}:{s.line_start}`  **{s.capability}**  _(model-proposed, AST-verified — VERIFY)_"
+        f"- `{s.file_path}:{_sink_ln(s)}`  **{s.capability}**  _(model-proposed, AST-verified — VERIFY)_"
         for s in ai[:40]) or "- (none — AI tier off or nothing found)")
     # AI tier health: a broken agent backend is SHOWN, never silent — "(none)" must never masquerade as
     # "the AI tier ran and found nothing" when the backend never launched.
@@ -211,19 +260,26 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
 > control runs/blocks/is deployed. Findings marked _AI_ are model-proposed and MUST be human-verified.
 
 ## Summary
-- **Dangerous action-surfaces discovered:** {m['total']}
+- **Action-surfaces mapped (total):** {m.get('mapped', m['total'])}  (matches the HTML headline; every one appears below)
+- **Dangerous action-surfaces (critical capability):** {m['total']}
+- **Below the critical line — review manually:** {len(m.get('review_rows', []))}  (dynamic dispatch / REVIEW verdicts — mapped, not dropped)
 - **Have a control (present, unverified):** {m['gated']}  ({m['coverage_pct']}% coverage)
 - **NO control found:** {m['no_gate']}  (each fix-plan item below carries its real tier — fix-first, reachable-action review, or wiring-time)
 - **Gate looks FAKE (no-op / fail-open):** {m['fake']}
 - **AI-suspected surfaces (model-proposed, review):** {len(ai)}
-- **Install-liability (RCE-class inherited):** {_install_liab}  ·  inherited rating: {_install_band}
+- **Reachability UNKNOWN (verify manually):** {_reach_unknown}  (RCE-class, could not be proven inert — untrusted ingress / unresolved dispatch present)
+- **Install-liability (RCE-class inherited, proven inert):** {_install_liab}  ·  inherited rating: {_install_band}
 - **Proven-live (PoC-confirmed) critical:** {_proven}
 
 ## Honest scope — read this before you act
 - **Install-liability = inert here, live on install.** The {_install_liab} inherited RCE-class surfaces are
-  NOT reachable from this repo's own entrypoints today — they are inert here, live on install: they become a
-  live attack surface the moment a downloader wires untrusted input into them. This is NOT a "vulnerability"
-  in this repo and is never reported as one.
+  proven NOT reachable from this repo's own entrypoints today AND sit behind no untrusted ingress/unresolved
+  dispatch — they are inert here, live on install: a live attack surface the moment a downloader wires
+  untrusted input into them. This is NOT a "vulnerability" in this repo and is never reported as one.
+- **Reachability UNKNOWN = {_reach_unknown}.** {"No sink is in this state" if not _reach_unknown else f"{_reach_unknown} RCE-class sink(s) could NOT be proven inert"} — an untrusted
+  ingress (e.g. an HTTP route) and/or dynamic dispatch the tracer could not resolve is present, so a request
+  may reach them. This is **reachability not proven — verify manually**, never "not reachable". An analysis
+  limit is not a safety fact.
 - **Proven-live = {_proven}.** {"No critical finding here is PoC-confirmed" if not _proven else f"{_proven} critical finding(s) PoC-confirmed"} — proven_live_poc=0 means
   **not demonstrated**, never "secure". A zero is the absence of a proof, not a clean bill of health.
 
@@ -249,7 +305,13 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
 ## 4. Controls present but UNVERIFIED (polarity/reachability not machine-checked)
 {_list('GATE_UNVERIFIED')}
 
-## 5. AI-suspected surfaces — model-proposed, human MUST verify
+## 5. Mapped — review manually (below the critical-capability line)
+> Surfaces we mapped but that sit below the critical-capability line — dynamic dispatch, REVIEW verdicts.
+> They are NOT dropped from the count (the headline total includes them); resolve the dispatch target and
+> verify manually. Deterministic (not AI-suspected).
+{_review_list()}
+
+## 6. AI-suspected surfaces — model-proposed, human MUST verify
 > Found by the AI-assist tier (any coding agent) on files the static rules missed, each AST-verified as a
 > real call. NOT counted in the coverage number above. Treat as leads to review, not confirmed findings.
 {ai_block}
@@ -298,13 +360,17 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     install_liab = _ir.get("install_liability_rce", 0)
     amber_actions = _ir.get("reachable_amber_actions", 0)
     fixed_dest_reviews = _ir.get("reachable_fixed_dest_review", 0)
+    reach_unknown = _ir.get("reachability_unknown", 0)
+    reach_unknown_reason = _ir.get("reachability_unknown_reason", {}) or {}
     proven = _ir.get("proven_live_poc", 0)
     band = (_ir.get("install_liability_rating") or {}).get("band", "Low")
     overall = _ir.get("overall_rating", "None (no proven-live)")
     # LAUNCH REFRAME (presentation only): the verdict band shows a plain-English display string; the RAW
     # OWASP rating string moves into the small caveat line, verbatim. Never rendered as "all-clear" green.
     overall_display = "No proven-live exploit path" if str(overall).startswith("None") else overall
-    total_surfaces = len(scan["surfaces"])
+    # HEADLINE "N mapped" = the deterministic mapped total from the shared report model (critical rows +
+    # review-manually rows), so it EQUALS what the body renders and reconciles with the MD top-line.
+    total_surfaces = m.get("mapped", len([s for s in scan["surfaces"] if s.context == "prod"]))
     files = scan["files_scanned"]
     # Real coverage the scan computed (scanned source files / scannable source after SKIP_DIRS) — NEVER a
     # hardcoded "100%". A sub-100 figure is honest about unsupported languages / files we did not read.
@@ -319,8 +385,13 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     # (install-liability only), CALM BLUE (neither). Blue is "no live threat PROVEN", never "secure".
     # CANONICAL verdict — shared with the CLI (install_report.verdict_band) so the HTML banner and the CLI
     # can never disagree. This chooses the band/icon/head; the human-facing sub-copy is built per-band below.
-    _vb = IR.verdict_band(reachable, proven, install_liab, amber_actions, fixed_dest_reviews)
+    _vb = IR.verdict_band(reachable, proven, install_liab, amber_actions, fixed_dest_reviews, reach_unknown)
     b_cls, b_icon, b_head = _vb["code"], _vb["icon"], _vb["head"]
+    # Reason string for the reachability-unknown band — why we could not prove inert (never a safety claim).
+    _ru_why = " and ".join(
+        w for w, on in (("an untrusted ingress (e.g. an HTTP route)", reach_unknown_reason.get("untrusted_ingress")),
+                        ("dynamic dispatch we could not resolve", reach_unknown_reason.get("unresolved_dispatch"))) if on
+    ) or "reachability could not be proven"
     if proven > 0 or reachable > 0:
         n = reachable if reachable else proven
         b_sub = (f"<b>{n} dangerous {_pl(n, 'action', 'actions')}</b> an attacker can reach in this code "
@@ -342,6 +413,15 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
                      f"(a messaging/external send to a proven config/constant destination) an attacker can "
                      f"reach here with tainted content — not exfil (the destination can't be steered), but "
                      f"review before you ship.")
+        if install_liab:
+            b_sub += (f" Plus <b>{install_liab}</b> install-liability {_pl(install_liab, 'item', 'items')} "
+                      f"that {_pl(install_liab, 'goes', 'go')} live on install.")
+    elif reach_unknown > 0:
+        # REACHABILITY UNKNOWN — we could NOT prove these inert. Never "nothing is reachable" / "inert here".
+        b_sub = (f"<b>{reach_unknown} RCE-class {_pl(reach_unknown, 'sink', 'sinks')}</b> we could <b>not prove "
+                 f"inert</b> — the repo has {_ru_why}, so a request may reach {_pl(reach_unknown, 'it', 'them')} "
+                 f"along a path we could not trace. <b>Reachability not proven — verify manually.</b> This is not "
+                 f"a safety claim.")
         if install_liab:
             b_sub += (f" Plus <b>{install_liab}</b> install-liability {_pl(install_liab, 'item', 'items')} "
                       f"that {_pl(install_liab, 'goes', 'go')} live on install.")
@@ -375,8 +455,15 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
                          f"reachable with no control</b> — a hijacked agent could push tainted content through a "
                          f"messaging/external send today. The destination is fixed (not exfil), but not nothing.")
         pw_do = ("<b>Review the “reachable actions” band below</b> and gate each one before you ship.")
+    elif reach_unknown > 0:
+        pw_urgent = (f"<b>Reachability not proven for {reach_unknown} RCE-class "
+                     f"{_pl(reach_unknown, 'sink', 'sinks')}</b> — the repo has {_ru_why}, so we cannot say "
+                     f"{_pl(reach_unknown, 'it is', 'they are')} unreachable. Verify manually; do not treat "
+                     f"this as safe.")
+        pw_do = ("<b>Trace each “reachability unknown” item from the ingress</b> and confirm with a PoC "
+                 "before you rely on it being inert.")
     elif install_liab > 0:
-        pw_urgent = (f"<b>Nothing is reachable right now</b> — but {install_liab} install-liability "
+        pw_urgent = (f"<b>Nothing was PROVEN reachable</b> — and {install_liab} install-liability "
                      f"{_pl(install_liab, 'item', 'items')} (dangerous capability that's harmless here but "
                      f"live once installed) {_pl(install_liab, 'needs', 'need')} a gate before shipping.")
         pw_do = ("<b>Gate every item marked “wiring-time”</b> before this code is installed or fed "
@@ -402,8 +489,23 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     # everything reachable-unguarded (both bands) — the id set the install-liability table must exclude
     live_ids = {id(s) for s in scan["surfaces"]
                 if getattr(s, "verdict", "") == "UNGUARDED_CRITICAL_LIVE_SINK" and _is_static(s)}
-    il = [s for s in scan["surfaces"] if s.context == "prod" and s.capability in _RCE
-          and _is_static(s) and id(s) not in live_ids]
+    # RCE-class, not reachable-red — the install-liability CANDIDATES. Split the SAME way install_report
+    # does: a candidate we could NOT prove inert (untrusted ingress and/or unresolved dispatch present, or
+    # the sink is itself tainted_reachable) is REACHABILITY_UNKNOWN — verify manually — NOT install-liability.
+    il_all = [s for s in scan["surfaces"] if s.context == "prod" and s.capability in _RCE
+              and _is_static(s) and id(s) not in live_ids]
+    _has_ingress = IR._repo_has_untrusted_ingress(scan)
+    _has_dispatch = IR._repo_has_unresolved_dispatch(
+        [s for s in scan["surfaces"] if s.context == "prod" and _is_static(s)])
+    reach_unknown_live, il = [], []
+    for s in il_all:
+        if getattr(s, "tainted_reachable", False) or _has_ingress or _has_dispatch:
+            reach_unknown_live.append(s)
+        else:
+            il.append(s)
+    # REVIEW-MANUALLY surfaces (count-reconciliation): mapped prod+static surfaces below the critical line
+    # (dynamic_dispatch / REVIEW verdicts) that would otherwise be silently dropped from every section.
+    review_live = list(m.get("review_rows", []))
 
     def esc(x):
         return _html.escape(str(x))
@@ -412,7 +514,7 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         out = []
         for s in items[:limit]:
             cap = _CAP_LABEL.get(s.capability, s.capability)
-            out.append(f"<tr><td class=mono>{esc(s.file_path)}<span class=ln>:{s.line_start}</span></td>"
+            out.append(f"<tr><td class=mono>{esc(s.file_path)}<span class=ln>:{_sink_ln(s)}</span></td>"
                        f"<td class=cap>{esc(cap)}</td><td class=sym>{esc(s.symbol or 'module-scope')}</td></tr>")
         if len(items) > limit:
             out.append(f"<tr><td colspan=3 class=more>…and {len(items) - limit:,} more in the full data "
@@ -424,9 +526,10 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     # finding tells ONE story everywhere: red -> fix first; amber -> reachable action, review before ship;
     # wiring -> gate on install. The red table therefore holds ONLY is_non_gated_vulnerable surfaces,
     # matching its "same reachable-unguarded rule as the Reachable in-repo count" claim below.
-    _fixrows = _fix_plan_rows(m["rows"])
+    _fixrows = _fix_plan_rows(m["rows"], scan)
     _fix_reach = [it for it in _fixrows if it["band"] == "red"]
     _fix_amber = [it for it in _fixrows if it["band"] == "amber"]
+    _fix_runknown = [it for it in _fixrows if it["band"] == "reach-unknown"]
     _fix_wiring = [it for it in _fixrows if it["band"] == "wiring"]
 
     def fixplan_rows(items, badge, empty, limit=30):
@@ -459,6 +562,18 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         "<b>review and gate each one before you ship</b> — not flagged “fix first”.</div>"
         f"<table>{_fixhead}" + fixplan_rows(
             _fix_amber, "<span class='badge rv'>reachable — review before ship</span>", "(none)")
+        + "</table>")
+    # REACHABILITY-UNKNOWN fix band — an RCE-class sink we could NOT prove inert (untrusted ingress /
+    # unresolved dispatch present). Rendered SEPARATELY from the wiring band so it is never mislabelled
+    # "inert here" — verify reachability first, then apply the real fix.
+    fixplan_runknown_block = "" if not _fix_runknown else (
+        "<h3>Reachability unknown — verify, then gate "
+        "<span class=c>— NOT proven inert; an untrusted route/dispatch may reach these</span></h3>"
+        "<div class=tier>These RCE-class sinks are <b>not proven inert</b> — an untrusted ingress and/or "
+        "unresolved dispatch is present. <b>Trace each from the ingress and confirm with a PoC</b> before "
+        "treating it as install-liability; then apply the fix-at-source control.</div>"
+        f"<table>{_fixhead}" + fixplan_rows(
+            _fix_runknown, "<span class='badge ru'>reachability unknown — verify</span>", "(none)")
         + "</table>")
     fixplan_wiring_block = "" if not _fix_wiring else (
         "<h3>Gate on install — wiring-time <span class=c>— inert here, not a fix-now item</span></h3>"
@@ -499,6 +614,47 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         "cannot steer where the data goes — this is not exfil. But the <b>content is tainted</b> and the "
         "send is unguarded, so a hijacked agent could still push attacker-shaped content through your own "
         f"channel. <b>Review and gate each one before you ship.</b></div><table>{rows(fixed_dest_live)}</table>")
+
+    # ---- REACHABILITY-UNKNOWN band: RCE-class sinks we could NOT prove inert. NEVER print an analysis limit
+    # as a safety fact — an untrusted ingress and/or unresolved dynamic dispatch is present, so these are
+    # "reachability not proven — verify manually", visually SEPARATE from install-liability and never "inert
+    # here / not reachable". Rendered only when present.
+    reach_unknown_html = "" if not reach_unknown_live else (
+        "<h2 class=ruflag>▸ Reachability unknown — verify manually "
+        "<span class=c>— NOT proven inert; an untrusted route/dispatch may reach these</span></h2>"
+        f"<div class=tier>These are RCE-class sinks (an attacker running their own code on your machine) we "
+        f"<b>could not prove inert</b>: the repo has {esc(_ru_why)}, so an untrusted request may reach them "
+        f"along a dispatch path the static tracer could not follow. This is <b>reachability not proven — "
+        f"verify manually</b>, NOT “inert here”. A sink reachable from an untrusted route is live here, not "
+        f"install-liability. <b>Trace each one from the ingress and confirm with a PoC.</b></div>"
+        f"<table>{rows(reach_unknown_live)}</table>")
+
+    # ---- MAPPED — REVIEW MANUALLY: prod surfaces below the critical-capability line (dynamic_dispatch,
+    # REVIEW verdicts). Counted in the "N mapped" headline, so they MUST be visible here — never silently
+    # dropped. Deterministic (not AI-suspected). Rendered only when present.
+    review_html = "" if not review_live else (
+        "<h2>▸ Mapped — review manually "
+        "<span class=c>— below the critical-capability line (dynamic dispatch / REVIEW)</span></h2>"
+        "<div class=tier>Surfaces we mapped but that sit below the critical-capability line — e.g. dynamic "
+        "dispatch or a REVIEW verdict. They are <b>counted in the mapped total above</b>, not dropped. "
+        "Resolve the dispatch target and <b>verify manually</b>.</div>"
+        f"<table>{rows(review_live)}</table>")
+
+    # ---- AI-SUSPECTED — advisory, OUTSIDE the deterministic verdict/counts. Mirrors the MD section. These
+    # are model-proposed (any coding agent), AST-verified as real calls, and NEVER touch the banner, the
+    # mapped total or any deterministic band. Rendered only when the AI tier produced surfaces.
+    ai_live = m.get("ai_rows", [])
+    # Always rendered (mirrors the MD section 6), even when empty, so the HTML and MD stay at parity and the
+    # segregation is explicit. Advisory only — OUTSIDE the deterministic verdict/counts, never in any band.
+    _ai_body = (f"<table>{rows(ai_live)}</table>" if ai_live
+                else "<div class=tier>(none — AI tier off or nothing found)</div>")
+    ai_html = (
+        "<h2 class=aiflag>▸ AI-suspected — advisory, verify "
+        "<span class=c>— model-proposed, OUTSIDE the deterministic verdict &amp; counts</span></h2>"
+        "<div class=tier>Found by the optional AI-assist tier on files the static rules missed, each "
+        "AST-verified as a real call. <b>Not counted</b> in the mapped total, the verdict or any band above "
+        "— advisory only. Treat as leads to review, <b>not confirmed findings</b>; a human must verify each "
+        f"one.</div>{_ai_body}")
 
     band_class = {"Low": "lo", "Med": "md", "High": "hi"}.get(band, "lo")
     fonts = _font_face_css()
@@ -583,6 +739,12 @@ color:{('var(--heat)' if 'None' not in overall else 'var(--cream)')}}}
 h2{{font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.12em;
 color:var(--blaze);margin:56px 0 8px;font-weight:600;border-top:1px solid var(--line);padding-top:30px}}
 h2 .c{{color:var(--muted);font-weight:400;letter-spacing:.02em;text-transform:none;margin-left:8px}}
+/* Reachability-unknown band — amber-flagged, visually distinct from the deterministic verdict/counts. */
+h2.ruflag{{color:var(--blaze);border-left:4px solid var(--blaze);padding-left:14px;
+background:linear-gradient(90deg,rgba(250,125,9,.08),transparent 60%)}}
+/* AI-suspected band — sky/blue-flagged, advisory, clearly OUTSIDE the deterministic verdict/counts. */
+h2.aiflag{{color:var(--sky);border-left:4px solid var(--sky);padding-left:14px;
+background:linear-gradient(90deg,rgba(43,125,226,.08),transparent 60%)}}
 h3{{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;
 color:var(--apricot);margin:28px 0 6px;font-weight:600}}
 h3 .c{{color:var(--faint);font-weight:400;letter-spacing:.02em;text-transform:none;margin-left:8px}}
@@ -603,6 +765,7 @@ text-transform:uppercase;padding:3px 9px;border-radius:999px;white-space:nowrap}
 .badge.ff{{color:var(--heat);border:1px solid rgba(255,67,1,.5);background:rgba(255,67,1,.1)}}
 .badge.rv{{color:var(--blaze);border:1px solid rgba(250,125,9,.5);background:rgba(250,125,9,.1)}}
 .badge.wt{{color:var(--blaze);border:1px solid rgba(250,125,9,.5);background:rgba(250,125,9,.1)}}
+.badge.ru{{color:var(--heat);border:1px solid rgba(255,67,1,.5);background:rgba(255,67,1,.1)}}
 /* ---- the Repairer CTA ---- */
 .cta{{background:linear-gradient(135deg,rgba(250,125,9,.16),rgba(255,67,1,.06));
 border:1px solid rgba(250,125,9,.5);border-radius:20px;padding:28px 32px;margin:44px 0 0}}
@@ -674,6 +837,8 @@ executed · the deterministic core makes no network calls (optional --ai/--deps 
 
 {fixed_dest_band_html}
 
+{reach_unknown_html}
+
 <h2>▸ Fix plan <span class=c>— generated, not applied</span></h2>
 <div class=tier>Suggested fix-at-source controls for the confirmed no-control / fake-gate findings.
 <b>The scanner plans these; it does not modify your code.</b> The Hermes Shield Repairer — the paid tier,
@@ -682,6 +847,7 @@ is guidance you apply and review.</div>
 <h3>Fix first — reachable now <span class=c>— {len(_fix_reach)} {_pl(len(_fix_reach), 'item', 'items')} · classified by the same reachable-unguarded rule as the “Reachable in-repo” count above</span></h3>
 <table>{_fixhead}{fixplan_reach_html}</table>
 {fixplan_amber_block}
+{fixplan_runknown_block}
 {fixplan_wiring_block}
 
 <div class=cta>
@@ -693,13 +859,18 @@ is guidance you apply and review.</div>
   <a class=link href="https://hermesshield.ai/repairer">Join the early-access list → hermesshield.ai/repairer</a>
 </div>
 
-<h2>▸ Install-liability <span class=c>— RCE-class capability you inherit on install</span></h2>
+<h2>▸ Install-liability <span class=c>— RCE-class capability you inherit on install (proven inert here)</span></h2>
 <div class=tier>RCE-class (an attacker running their own code on your machine) capabilities that are
-<b>inert here, live on install</b>: not reachable from this repo's own entrypoints today, but a live attack
-surface the moment they're wired into an agent that reads untrusted input. Capped at Med — not a
-vulnerability in this repo. The fix for these is wiring-time: gate each capability before you wire
-untrusted input to it on install — this is not a fix-now list.</div>
+<b>proven inert here, live on install</b>: not reachable from this repo's own entrypoints today <b>and</b>
+sitting behind no untrusted ingress or unresolved dispatch, but a live attack surface the moment they're
+wired into an agent that reads untrusted input. Capped at Med — not a vulnerability in this repo. The fix
+is wiring-time: gate each capability before you wire untrusted input to it on install — this is not a
+fix-now list. <b>Sinks we could not prove inert appear under “Reachability unknown” above, not here.</b></div>
 <table>{rows(il)}</table>
+
+{review_html}
+
+{ai_html}
 
 <h2>▸ Action-surface map <span class=c>— by capability</span></h2>
 <div class=bars>{bars}</div>

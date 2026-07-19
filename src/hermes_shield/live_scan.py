@@ -150,6 +150,7 @@ def signal_tally(report: dict, scan: dict) -> dict:
              and getattr(s, "context", "prod") == "prod")
     return {"reachable": reachable, "install": install, "amber_actions": amber_actions,
             "fixed_dest_reviews": fixed_dest_reviews,
+            "reachability_unknown": int(report.get("reachability_unknown", 0)),
             "needs_review": ai, "proven": int(report.get("proven_live_poc", 0))}
 
 
@@ -490,7 +491,8 @@ def render_finale(report: dict, scan: dict, out_dir, version: str, stream=None):
     reachable, proven, install, ai = sig["reachable"], sig["proven"], sig["install"], sig["needs_review"]
     amber_actions = sig["amber_actions"]
     fixed_dest_reviews = sig["fixed_dest_reviews"]
-    vb = _IR.verdict_band(reachable, proven, install, amber_actions, fixed_dest_reviews)
+    reach_unknown = sig["reachability_unknown"]
+    vb = _IR.verdict_band(reachable, proven, install, amber_actions, fixed_dest_reviews, reach_unknown)
     band_c = {"red": _HEAT, "amber": _A, "blue": _BLU}[vb["code"]]
 
     def w(s):
@@ -585,7 +587,7 @@ def render_quiet(report: dict, scan: dict, out_dir, stream=None):
     colour = _use_colour(stream)
     sig = signal_tally(report, scan)
     vb = _IR.verdict_band(sig["reachable"], sig["proven"], sig["install"], sig["amber_actions"],
-                          sig["fixed_dest_reviews"])
+                          sig["fixed_dest_reviews"], sig["reachability_unknown"])
     band_c = {"red": _HEAT, "amber": _A, "blue": _BLU}[vb["code"]]
     try:
         rel = os.path.relpath(str(out_dir), os.getcwd())

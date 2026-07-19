@@ -1051,19 +1051,103 @@ class _Visitor(ast.NodeVisitor):
 
 
 _ALWAYS_SHELL = {"system", "popen", "getoutput", "getstatusoutput", "getstatus", "create_subprocess_shell"}
+# POSIX shell interpreters: `sh -c <arg>` runs <arg> AS a shell command line even at shell=False, so a
+# constant-argv0 shell-with-`-c` is real shell interpretation (Fable-5's ['/bin/sh','-c',payload] example).
+_SHELL_INTERPRETERS = {"sh", "bash", "dash", "zsh", "ksh", "ash", "csh", "tcsh", "busybox"}
+
+
+def _explicit_shell_interpreter(node):
+    """True iff this subprocess call passes an INLINE command-list literal whose argv0 is a constant POSIX
+    shell interpreter invoked with a `-c` flag (`subprocess.run(['/bin/sh','-c', payload])`). That is genuine
+    shell interpretation of the following argument even though shell=False, so it must be treated on the
+    shell-form axis (a tainted arg -> command injection). Inline-literal only (no dataflow) — a shell argv0
+    reached through a variable that is itself tainted is already caught by the tainted_executable axis."""
+    cmd = _subprocess_cmd_node(node)
+    if not isinstance(cmd, (ast.List, ast.Tuple)) or not cmd.elts:
+        return False
+    a0 = cmd.elts[0]
+    if not (isinstance(a0, ast.Constant) and isinstance(a0.value, str)):
+        return False
+    base = a0.value.replace("\\", "/").rsplit("/", 1)[-1]
+    if base not in _SHELL_INTERPRETERS:
+        return False
+    return any(isinstance(e, ast.Constant) and e.value == "-c" for e in cmd.elts[1:])
 
 
 def _subprocess_shell_form(node):
     """S8.46: is this subprocess call SHELL-interpreted (so a tainted arg = command injection)? True iff
-    shell=True, or it's an always-shell function (os.system/os.popen/getoutput/create_subprocess_shell).
-    subprocess.run([list])/Popen without shell=True passes args literally -> a tainted DATA arg is NOT
-    injection (the CEO's repo pattern). Sound-leaning: unsure -> False (downgrade), tainted-executable
-    (cmd[0]) is a rarer case left to a future refinement."""
+    shell=True, an always-shell function (os.system/os.popen/getoutput/create_subprocess_shell), OR an
+    inline `['/bin/sh','-c', ...]`-style shell-interpreter invocation. subprocess.run([list])/Popen without
+    shell=True passes args literally -> a tainted DATA arg is NOT injection (the CEO's repo pattern).
+    Sound-leaning: unsure -> False (downgrade). NB: the tainted-EXECUTABLE case (attacker-controlled cmd[0] /
+    bare command string) is handled on a SEPARATE axis by analyse_subprocess_executables +
+    Surface.tainted_executable, which keeps a tainted-argv0 subprocess RED even at shell=False (shell form
+    only governs metacharacter parsing)."""
     for kw in node.keywords:
         if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
             return True
     tail = ((_dotted(node.func) or _attr_name(node.func) or "").split(".")[-1])
-    return tail in _ALWAYS_SHELL
+    if tail in _ALWAYS_SHELL:
+        return True
+    return _explicit_shell_interpreter(node)
+
+
+def _subprocess_cmd_node(node):
+    """The COMMAND argument of a subprocess call: the first positional arg, or an explicit args=/cmd= kwarg
+    (subprocess.run(args=...) / .Popen(args=...)). None if the call has no command argument."""
+    for kw in node.keywords:
+        if kw.arg in ("args", "cmd"):
+            return kw.value
+    return node.args[0] if node.args else None
+
+
+def _subprocess_argv0_node(node, assigns=None):
+    """The PROGRAM (argv0) node of a subprocess call, for the tainted-EXECUTABLE check. Resolve the command
+    through one shallow level of local assignment (`cmd = [payload, ...]`); if it is a list/tuple literal
+    argv0 is its first element; if it is anything else (a string constant, or an opaque variable that could
+    be either a bare command string or a list) return the command node itself so a tainted command variable
+    is treated as a tainted executable. Sound-leaning: shell=False constrains shell parsing, NOT which binary
+    runs, so an attacker-controlled argv0 is arbitrary-program RCE and must not be downgraded."""
+    assigns = assigns or {}
+    cmd = _subprocess_cmd_node(node)
+    if cmd is None:
+        return None
+    seen = 0
+    while isinstance(cmd, ast.Name) and cmd.id in assigns and seen < 3:
+        cmd = assigns[cmd.id]
+        seen += 1
+    if isinstance(cmd, (ast.List, ast.Tuple)):
+        return cmd.elts[0] if cmd.elts else None
+    return cmd
+
+
+def analyse_subprocess_executables(tree, subproc_lines, cli_main: bool = False) -> set:
+    """{sink_line} of subprocess calls whose PROGRAM (argv0) is attacker-controlled. Parallels
+    analyse_destinations but on the EXECUTABLE, not the destination: shell=False only removes
+    shell-metacharacter parsing; a tainted argv0 (`subprocess.run([payload, ...], shell=False)`,
+    `subprocess.run(['/bin/sh','-c',payload])` where argv0 itself is user-derived, or a tainted bare
+    command string) is still full RCE and must stay RED. A CONSTANT/known program with only tainted ARGS
+    (`subprocess.run(['/usr/bin/git', user_arg], shell=False)`) is NOT tainted-executable and still
+    downgrades. Sound-leaning: an unresolved command variable that is itself tainted counts as a tainted
+    executable; a command we cannot tie to taint -> not reported (the downgrade stands)."""
+    from . import taint as _T
+    out = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        assigns = _local_assigns(fn)
+        ft = None
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Call) and n.lineno in subproc_lines:
+                a0 = _subprocess_argv0_node(n, assigns)
+                if a0 is None:
+                    continue
+                if ft is None:
+                    ft = _T._FnTaint(fn, cli_main=cli_main)
+                tainted, _ = ft.arg_taint(a0)
+                if tainted:
+                    out.add(n.lineno)
+    return out
 
 
 def _dead_line_ranges(tree):

@@ -58,6 +58,15 @@ _RAW_INGRESS = [
     ("telegram", r"telegram.*(message|callback|update)|getUpdates|callback_data"),
     ("dashboard", r"parse_qs|request\.form|self\.rfile\.read|input.*value"),
     ("api", r"response\.json\(\)|payload\[|external.*api"),
+    # HTTP route decorators = an untrusted network ingress (request body/params are attacker-controlled).
+    # Scoped to decorator/route detection only — NOT full framework modelling. Covers Flask/FastAPI/
+    # Starlette (@app.route/@app.get/@router.post/@blueprint.route), aiohttp (routes.get / add_post),
+    # and Django URL routing (path()/re_path()/url()). Catches registry-dispatch RCE sitting behind a
+    # route so it is never mislabelled "inert here".
+    ("http_route", r"@\s*\w+\.(?:route|get|post|put|delete|patch|websocket|api_route)\s*\(|"
+                   r"@\s*(?:routes|router)\.(?:get|post|put|delete|patch|view|websocket)\s*\(|"
+                   r"(?:web|app|routes)\.add_(?:route|get|post|put|delete|patch)\s*\(|"
+                   r"(?:^|\W)(?:path|re_path|url)\s*\(\s*[rf]?['\"]"),
 ]
 INGRESS_PATTERNS = [(src, re.compile(rx, re.I)) for src, rx in _RAW_INGRESS]
 

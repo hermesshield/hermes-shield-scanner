@@ -40,6 +40,7 @@
         },
         "guard_kind": "kill_switch",
         "guard_line": 3,
+        "guard_return_consumed": false,
         "integrity_review_required": true,
         "integrity_warning": "control is present but polarity / reachability / semantics are NOT statically verified \u2014 a human must confirm this gate actually blocks (guard def unresolved)",
         "limitations": [],
@@ -88,6 +89,7 @@
       "symbol": "act",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -173,6 +175,7 @@
       "symbol": "act",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -252,6 +255,7 @@
       "symbol": "do_POST",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -331,6 +335,7 @@
       "symbol": "do_POST",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -416,6 +421,7 @@
       "symbol": "send",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -462,6 +468,7 @@
         },
         "guard_kind": "kill_switch",
         "guard_line": 5,
+        "guard_return_consumed": false,
         "integrity_review_required": true,
         "integrity_warning": "control is present but polarity / reachability / semantics are NOT statically verified \u2014 a human must confirm this gate actually blocks (guard def unresolved)",
         "limitations": [],
@@ -511,6 +518,7 @@
       "symbol": "send",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -557,6 +565,7 @@
         },
         "guard_kind": "kill_switch",
         "guard_line": 3,
+        "guard_return_consumed": false,
         "integrity_review_required": true,
         "integrity_warning": "control is present but polarity / reachability / semantics are NOT statically verified \u2014 a human must confirm this gate actually blocks (guard def unresolved)",
         "limitations": [],
@@ -607,6 +616,7 @@
       "symbol": "post",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -692,6 +702,7 @@
       "symbol": "post",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -724,30 +735,21 @@
           }
         ]
       },
-      "guard_evidence_level": "proven_before_sink",
+      "guard_evidence_level": "none",
       "guard_proof": {
-        "configured_guard_id": "approval_hash_gate",
         "enclosing_symbol": "approve",
-        "guard_identity": "resolved_import",
-        "guard_identity_source": "configured",
-        "guard_integrity": {
-          "flags": [],
-          "guard_file": null,
-          "guard_symbol": "get_approved",
-          "verdict": "GUARD_DEF_UNRESOLVED"
-        },
-        "guard_kind": "approval_hash_gate",
-        "guard_line": 5,
-        "integrity_review_required": true,
-        "integrity_warning": "control is present but polarity / reachability / semantics are NOT statically verified \u2014 a human must confirm this gate actually blocks (guard def unresolved)",
-        "limitations": [],
+        "guard_identity": null,
+        "guard_kind": null,
+        "limitations": [
+          "no recognised guard call reaches this sink"
+        ],
         "modules_involved": [],
-        "proof_type": "same_function_before_sink",
+        "proof_type": "no_guard_found",
         "scope": "intraprocedural",
         "sibling_sink_lines": [],
         "sink_detection_mode": "ast_call",
-        "sink_line": 6,
-        "status": "proven"
+        "sink_line": 0,
+        "status": "unproven"
       },
       "guards": {
         "certified": false,
@@ -770,14 +772,16 @@
       "line_end": 6,
       "line_start": 2,
       "live_capable": "yes",
-      "live_promotion_verdict": "REVIEW",
+      "live_promotion_verdict": "BLOCK",
       "module_scope": false,
       "mutating": "yes",
-      "patch_recommendations": [],
-      "protection_confidence": "high",
+      "patch_recommendations": [
+        "Add global kill-switch guard (assert_live_action_allowed) before this outbound action"
+      ],
+      "protection_confidence": "low",
       "risk_level": "critical",
-      "scope": "static_proof_only",
-      "severity_rank": 7,
+      "scope": "untested_gap",
+      "severity_rank": 4,
       "shell_form": true,
       "sink_detection_mode": "ast_call",
       "sink_line": 6,
@@ -787,13 +791,14 @@
       "symbol": "approve",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
         "mutation": false,
         "test_files": []
       },
-      "verdict": "NEEDS_RETEST"
+      "verdict": "BLOCK_LIVE_PROMOTION"
     },
     {
       "ai_confidence": 0.0,
@@ -872,6 +877,7 @@
       "symbol": "approve",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -949,6 +955,7 @@
       "symbol": "describe",
       "taint_source": "",
       "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,

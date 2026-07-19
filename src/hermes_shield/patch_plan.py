@@ -13,8 +13,9 @@ from . import install_report as _IR
 # Fix-at-source remediation, keyed on the real dangerous-capability vocabulary. Customer-facing prose:
 # concrete, actionable, no product-internal jargon.
 _REMEDIATION = {
-    "code_exec": "Replace eval/exec with ast.literal_eval or a sandboxed evaluator; if dynamic code is "
-                 "genuinely required, allowlist the inputs and human-gate the call.",
+    "code_exec": "Replace eval/exec with ast.literal_eval (Python eval sandboxes are trivially escaped, so "
+                 "never rely on one); if dynamic code is genuinely required, allowlist the inputs and "
+                 "human-gate the call.",
     "subprocess_exec": "Run with shell=False and an argument allowlist; never interpolate model or user "
                        "output into the command string.",
     "deserialize": "Use yaml.safe_load / JSON instead of pickle; never unpickle untrusted bytes.",

@@ -68,6 +68,24 @@ STRONG = {RESOLVED_IMPORT, LOCAL_DEFINITION, CERTIFIED_GATEWAY, CONFIGURED_GUARD
 CRITICAL_GUARD_KINDS = {"kill_switch", "final_action_gate", "user_declared_gate"}
 
 
+# RAISE-STYLE (side-effect) guard symbols: a BARE call is a genuine dominating gate because it RAISES /
+# exits on failure — the control-flow abort IS the protection, so there is no return value to consume.
+# Return-based predicates (allow_action, live_actions_blocked, is_*, get_*) communicate their decision ONLY
+# via the return value; a BARE call that DISCARDS that return is a no-op and must NOT be credited as a
+# dominating guard (the guard-bypass / ignored-kill-switch class). Sound-leaning: only clearly raise-style
+# names qualify; anything else needs explicit consumption (if/while test, assert, or assign-then-branch).
+_RAISE_STYLE_PREFIXES = ("assert_", "require_", "ensure_", "enforce_", "verify_")
+
+
+def guard_symbol_raises(symbol: Optional[str]) -> bool:
+    """True when a BARE call to this guard symbol is a side-effect (raise/exit) gate whose control value is
+    consumed by the abort itself. Return-based predicates return False (they need explicit consumption)."""
+    if not symbol:
+        return False
+    tail = symbol.split(".")[-1]
+    return tail.startswith(_RAISE_STYLE_PREFIXES)
+
+
 def guard_class(guard_kind: Optional[str], capability: str = "") -> str:
     """Classify a resolved guard KIND for a given sink capability: 'critical' | 'content' | 'weak'.
     csrf_token is critical only for dashboard_mutation (it gates the dashboard POST, nothing else)."""

@@ -62,15 +62,23 @@ _QUADRANT = {
 _CRITICAL_IDENTITY = {MI.RESOLVED_IMPORT, MI.CERTIFIED_GATEWAY, MI.CONFIGURED_GUARD}
 
 
-def _critical_before(fg: FileGraph, fn: str, upto_line: int, cap: str):
+def _critical_before(fg: FileGraph, fn: str, upto_line: int, cap: str, sink_vars=frozenset()):
     """The dominating CRITICAL guard for `cap` before `upto_line` in `fn`, or None. Reuses the sound
-    dominance in FileGraph.top_guards; credits only a resolved-import/gateway critical guard identity."""
+    dominance in FileGraph.top_guards; credits only a resolved-import/gateway critical guard identity.
+
+    fix C: a guard that inspects only a DIFFERENT variable than the sink consumes (a wrong-variable gate)
+    does not gate the tainted flow and is NOT credited — unless it is an action-level gate (no variable
+    argument). `sink_vars` are the variable names the ultimate sink consumes."""
     f = fg.funcs.get(fn)
     if not f:
         return None
+    meta = getattr(fg, "_guard_meta", {})
     for g in f["top_guards"]:
         identity = g[2] if len(g) > 2 else None
         if g[0] < upto_line and MI.guard_class(g[1], cap) == "critical" and identity in _CRITICAL_IDENTITY:
+            gvars = (meta.get(g[0]) or {}).get("arg_vars") or frozenset()
+            if gvars and not (gvars & set(sink_vars)):
+                continue                     # wrong-variable guard — inspects a different var than the sink
             return g
     return None
 
@@ -138,6 +146,10 @@ def attribute(surface, graphs: Dict[str, FileGraph], mod2files: dict = None, inn
     if not sink_fn:
         return {"critical_guard_on_path": "unknown", "guards_found": [], "unguarded_paths": [],
                 "resolution_limits": ["sink_at_module_scope"], "path_scope": "intraprocedural"}
+    # fix C: the variables the ultimate sink consumes — a guard credits only if it is action-level or
+    # inspects one of these (see _critical_before).
+    _sink_ln = getattr(surface, "sink_line", 0) or surface.line_start
+    sink_vars = frozenset(fg.call_arg_vars.get(_sink_ln, set()))
 
     def visit(cur_fg: FileGraph, fn: str, upto_line: int, depth: int) -> str:
         key = (id(cur_fg), fn)
@@ -149,7 +161,7 @@ def attribute(surface, graphs: Dict[str, FileGraph], mod2files: dict = None, inn
             # softer REVIEW that escapes enforcement. A merely-deep unguarded chain stays severe.
             limits.append(f"depth_exceeded@{fn}")
             return "no"
-        g = _critical_before(cur_fg, fn, upto_line, cap)
+        g = _critical_before(cur_fg, fn, upto_line, cap, sink_vars)
         if g:
             guards_found.append({"guard_type": g[1], "identity": g[2], "guard_line": g[0], "at": fn})
             return "yes"
@@ -306,7 +318,14 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
         # combined "guarded" signal gates BOTH the fixed-dest demotion (BLOCKER 2 — a guarded send is never
         # demoted to the amber band) and the later strong-proof downgrade.
         _proof_id = s.guard_proof.get("guard_identity")
-        _proof_strong = (s.guard_proof.get("status") == "proven" and _proof_id in _CRITICAL_IDENTITY)
+        # fix D: an IN-FILE-ONLY proof (private_wrapper_guarded, proven from in-file callers only) is NOT
+        # whole-program — it cannot override guard_attribution's own cross-file traversal. When that
+        # traversal found any reachable UNGUARDED path (state 'partial'/'no' with a cross-file caller), the
+        # in-file proof must not downgrade the sink to protected. In-FUNCTION dominance proofs
+        # (same_function_before_sink / early_return_guard / assert / try_block / cross-module gateway) DO hold
+        # whole-program (the guard sits between every entry and the sink) and still count as strong.
+        _proof_strong = (s.guard_proof.get("status") == "proven" and _proof_id in _CRITICAL_IDENTITY
+                         and not s.guard_proof.get("in_file_only", False))
         _guarded = (state == "yes") or _proof_strong
         # AI-SUSPECTED SURFACES ARE ADVISORY — NEVER a deterministic verdict (the honesty invariant).
         # A model GUESS (detection_source in {ai_suspected, ai_corroborated}, verdict AI_SUSPECTED_REVIEW)
@@ -374,7 +393,16 @@ def apply(root: Path, surfaces, graphs: Optional[Dict[str, FileGraph]] = None, p
         # S8.46 subprocess shell-form: a subprocess with a tainted DATA argument but NO shell interpretation
         # (subprocess.run([list])/Popen without shell=True) is NOT command injection — the arg is passed
         # literally, not parsed by a shell. Downgrade to review; shell=True and os.system stay critical.
-        if (s.capability == "subprocess_exec" and not getattr(s, "shell_form", True)):
+        # BLOCKER (Fable-5 tainted-executable): shell=False ONLY removes shell-metacharacter parsing — it does
+        # NOT constrain WHICH BINARY runs. A subprocess whose PROGRAM (argv0 / command-list[0] / command
+        # string) is attacker-controlled (`subprocess.run([payload, ...], shell=False)`,
+        # `subprocess.run(['/bin/sh','-c', ...])` with a user-derived argv0, or a tainted bare command string)
+        # is STILL full arbitrary-program RCE and must stay a critical live-promotion BLOCK regardless of
+        # shell form. Only downgrade when the executable is CONSTANT/known and ARGS are the only variable
+        # part (the legitimate `subprocess.run(['/usr/bin/git', user_arg], shell=False)` pattern) — do NOT
+        # over-correct into flagging every shell=False call.
+        if (s.capability == "subprocess_exec" and not getattr(s, "shell_form", True)
+                and not getattr(s, "tainted_executable", False)):
             s.severity_rank = 5
             s.verdict = "SUBPROCESS_NON_SHELL_REVIEW"
             s.live_promotion_verdict = "REVIEW"

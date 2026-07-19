@@ -121,6 +121,21 @@ def _is_cli_command(d):
     return False
 
 
+def _body_exits(body) -> bool:
+    """True when a guarded branch UNCONDITIONALLY exits — return/raise only, or a single exit()/quit()/
+    sys.exit()/os._exit() call. Pass/Continue/log-only bodies do NOT dominate a straight-line sink."""
+    types = {type(s) for s in body}
+    if types and types <= {ast.Return, ast.Raise}:
+        return True
+    if len(body) == 1 and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Call):
+        f = body[0].value.func
+        if isinstance(f, ast.Name) and f.id in ("exit", "quit"):
+            return True
+        if isinstance(f, ast.Attribute) and f.attr in ("exit", "_exit"):
+            return True
+    return False
+
+
 def _has_main_guard(tree) -> bool:
     """S8.85: True when the module has a top-level `if __name__ == "__main__":` guard — i.e. it runs as a
     CLI child/script whose stdin/argv is operator/parent-supplied (trusted IPC), not an attacker channel."""
@@ -160,6 +175,20 @@ class FileGraph:
                 start = n.finalbody[0].lineno
                 end = max(getattr(s, "end_lineno", s.lineno) for s in n.finalbody)
                 self.finally_ranges.append((start, end))
+        # fix C: per-line variable arguments of every call — the sink's tainted-variable correspondence set.
+        # A guard credits a sink only if it is action-level (no variable arg) OR one of its argument variables
+        # is a variable the sink consumes (see prove / guard_attribution). Top-level Name args only.
+        self.call_arg_vars: Dict[int, set] = {}
+        for c in ast.walk(tree):
+            if isinstance(c, ast.Call):
+                names = {a.id for a in list(c.args) + [k.value for k in c.keywords]
+                         if isinstance(a, ast.Name)}
+                if names:
+                    self.call_arg_vars.setdefault(c.lineno, set()).update(names)
+        # fix A/C: per-guard metadata keyed by the guard's credited line — its argument variables (for the
+        # sink-correspondence check) and HOW its control value is consumed (bare_raise/if_test/assert/
+        # assign_branch). A bare_raise credit is a raise-ASSUMPTION; guard_integrity re-checks the def.
+        self._guard_meta: Dict[int, dict] = {}
         defs = [n for n in ast.walk(tree)
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
         self.local_names = {d.name for d in defs}
@@ -188,36 +217,102 @@ class FileGraph:
             return {"strong": False, "identity": MI.REJECTED_COLLISION, "kind": None}
         return MI.resolve_guard_identity(bare, is_method, self.imports, self.local_names)
 
+    def _record_guard(self, line: int, call: ast.Call, consumed: str) -> None:
+        """fix A/C: record a credited guard's argument variables + consumption mode, keyed by the line the
+        top_guards tuple carries (so prove/guard_attribution can look it up)."""
+        names = {a.id for a in list(call.args) + [k.value for k in call.keywords]
+                 if isinstance(a, ast.Name)}
+        self._guard_meta[line] = {"arg_vars": frozenset(names), "consumed": consumed}
+
+    def _is_side_effect_gate(self, call: ast.Call) -> bool:
+        """fix A: a BARE guard call credits ONLY if the guard is a raise-style (side-effect) gate — it aborts
+        on failure, so the control value is consumed by the abort. Resolves import aliases to the ORIGINAL
+        symbol so `... import assert_live_action_allowed as _ks` is still recognised as raise-style."""
+        bare, _ = _call_name(call)
+        if bare is None:
+            return False
+        orig = bare
+        imp = self.imports.get(bare)
+        if imp and imp.get("orig"):
+            orig = imp["orig"]
+        elif "." in bare:
+            orig = bare.split(".")[-1]
+        return MI.guard_symbol_raises(orig)
+
     def _guards_from_stmts(self, stmts, source: str) -> List[tuple]:
-        """Dominating guards among a list of top-level statements. Returns (line, kind, identity, source)."""
+        """Dominating guards among a list of top-level statements. Returns (line, kind, identity, source).
+
+        fix A (ignored-return no-op): a guard credits ONLY when its control value is CONSUMED — a raise-style
+        BARE call (aborts on failure), an `assert guard(...)`, an early-exit `if <guard-test>: return/raise/
+        exit`, or an `x = guard(); if not x: return`. A bare RETURN-based call whose boolean is DISCARDED
+        (`live_actions_blocked()` / `allow_action()` on its own line) is a no-op and is NOT credited."""
         out: List[tuple] = []
-        for stmt in stmts:
+        for idx, stmt in enumerate(stmts):
             if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
                 r = self._resolve(stmt.value)
-                if r["strong"]:
+                if r["strong"] and self._is_side_effect_gate(stmt.value):
+                    self._record_guard(stmt.lineno, stmt.value, "bare_raise")
                     out.append((stmt.lineno, r["kind"], r["identity"], source))
             elif isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
                 r = self._resolve(stmt.value)
-                if r["strong"]:
+                # credit ONLY when the assigned decision is consumed by a following dominating early-exit
+                # branch (`flag = guard(); if not flag: return`). A bare unused assignment is a no-op.
+                if r["strong"] and self._assign_consumed_exit(stmt, stmts[idx + 1:]):
+                    self._record_guard(stmt.lineno, stmt.value, "assign_branch")
                     out.append((stmt.lineno, r["kind"], r["identity"], source))
+            elif isinstance(stmt, ast.Assert):
+                # `assert guard(...)` — the boolean is consumed (AssertionError on false) -> dominating.
+                calls = [c for c in ast.walk(stmt.test) if isinstance(c, ast.Call)]
+                if len(calls) == 1:
+                    r = self._resolve(calls[0])
+                    if r["strong"]:
+                        self._record_guard(stmt.lineno, calls[0], "assert")
+                        out.append((stmt.lineno, r["kind"], r["identity"], source + "_assert"))
             elif isinstance(stmt, ast.If):
-                # early-return guard: `if <guard-test>: return/raise`. SOUND only if (a) the guarded
-                # branch UNCONDITIONALLY EXITS — return/raise ONLY (Pass does not exit; Continue only
+                # early-exit guard: `if <guard-test>: return/raise/exit`. SOUND only if (a) the guarded
+                # branch UNCONDITIONALLY EXITS — return/raise/exit ONLY (Pass does not exit; Continue only
                 # skips a loop iteration and does not dominate a straight-line sink) — and (b) the guard
                 # call SOLELY determines the branch: exactly one call in the test, so a compound
                 # `if not guard() and other(): return` cannot short-circuit past the guard to the sink.
                 # (CTO-REVIEW P2.9G soundness fix.) Residual: we cannot resolve the guard's return
                 # POLARITY statically (`if is_blocked(): return` vs `if allows(): return`) — that needs
                 # guard-integrity analysis (Stage 1.5); documented limitation.
-                body_types = {type(s) for s in stmt.body}
-                if body_types and body_types <= {ast.Return, ast.Raise}:
+                if _body_exits(stmt.body):
                     calls = [c for c in ast.walk(stmt.test) if isinstance(c, ast.Call)]
                     if len(calls) == 1:
                         r = self._resolve(calls[0])
                         if r["strong"]:
-                            out.append((getattr(stmt, "end_lineno", stmt.lineno), r["kind"],
-                                        r["identity"], source + "_early_return"))
+                            gl = getattr(stmt, "end_lineno", stmt.lineno)
+                            self._record_guard(gl, calls[0], "if_test")
+                            out.append((gl, r["kind"], r["identity"], source + "_early_return"))
         return out
+
+    def _assign_consumed_exit(self, assign: ast.Assign, following) -> bool:
+        """fix A: True when an assigned guard result (`flag = guard()`) is CONSUMED by a following dominating
+        early-exit branch (`if not flag: return/raise/exit`). A bare, never-branched assignment is a no-op."""
+        targets = {n.id for tg in assign.targets for n in ast.walk(tg) if isinstance(n, ast.Name)}
+        if not targets:
+            return False
+        for s in following:
+            if isinstance(s, ast.If) and _body_exits(s.body):
+                used = {n.id for n in ast.walk(s.test) if isinstance(n, ast.Name)}
+                if used & targets:
+                    return True
+        return False
+
+    def _guard_corresponds(self, guard_line: int, sink_vars: set) -> bool:
+        """fix C (wrong-variable guard): a guard downgrades a sink only if it plausibly inspects the sink's
+        tainted variable — either it is an ACTION-LEVEL gate (no variable argument: kill-switch / approval /
+        constant-descriptor) OR one of its argument variables is a variable the sink consumes. A guard that
+        inspects only a DIFFERENT variable (`allow_action(user_id)` guarding `eval(text)`) does not gate the
+        tainted data flow and must NOT be credited."""
+        meta = self._guard_meta.get(guard_line)
+        if not meta:
+            return True
+        gvars = meta.get("arg_vars") or frozenset()
+        if not gvars:
+            return True                       # action-level gate (no data-variable argument)
+        return bool(gvars & set(sink_vars))
 
     @staticmethod
     def _all_handlers_reraise(trynode) -> bool:
@@ -269,7 +364,11 @@ class FileGraph:
             return _unproven("sink_in_finally",
                              ["sink is inside a finally block; it runs even if the guard raised"])
         f = self.funcs[fn]
-        before = [g for g in f["top_guards"] if g[0] < sink_line]
+        # fix C: a guard credits this sink only if it corresponds to the sink's tainted variable (or is an
+        # action-level gate). A wrong-variable guard (`allow_action(user_id)` before `eval(text)`) is ignored.
+        sink_vars = self.call_arg_vars.get(sink_line, set())
+        before = [g for g in f["top_guards"]
+                  if g[0] < sink_line and self._guard_corresponds(g[0], sink_vars)]
         if before:
             g = before[-1]
             src = g[3] if len(g) > 3 else "body"
@@ -280,10 +379,15 @@ class FileGraph:
             else:
                 ptype = "same_function_before_sink"
             from . import module_index as _MI
+            # fix B input: whether the credited guard's control value is genuinely CONSUMED at this site.
+            # A bare_raise credit is a raise-ASSUMPTION — guard_integrity re-checks the def and, if it is
+            # return-based (the assumption was wrong), re-escalates the discarded-return no-op to BLOCK.
+            _meta = self._guard_meta.get(g[0], {})
             return {"status": "proven", "proof_type": ptype,
                     "guard_kind": g[1], "guard_identity": g[2],
                     "configured_guard_id": _MI.configured_guard_id(None) or g[1],
                     "guard_identity_source": "configured", "guard_line": g[0], "sink_line": sink_line,
+                    "guard_return_consumed": _meta.get("consumed") != "bare_raise",
                     "enclosing_symbol": fn, "scope": "intraprocedural", "modules_involved": [],
                     "limitations": []}
         callers = self._callers_of(fn)
@@ -300,9 +404,14 @@ class FileGraph:
                     all_guarded = False
                     break
             if all_guarded and proof_callers:
+                # fix D: this proof rests on IN-FILE callers ONLY. It is NOT whole-program: a cross-file
+                # caller may reach the sink unguarded. Mark it so guard_attribution never lets this in-file
+                # proof override its own cross-file traversal — if that traversal finds any reachable
+                # unguarded path (state 'partial'/'no'), the sink stays RED, not downgraded to protected.
                 return {"status": "proven", "proof_type": "private_wrapper_guarded",
                         "guard_kind": "caller", "guard_identity": MI.RESOLVED_IMPORT,
                         "enclosing_symbol": fn, "proof_callers": proof_callers, "sink_line": sink_line,
+                        "in_file_only": True,
                         "scope": "intraprocedural", "modules_involved": [], "limitations": []}
             return _unproven("caller_guarded_not_proven",
                              [f"{fn} has at least one unguarded in-file caller"], fn)

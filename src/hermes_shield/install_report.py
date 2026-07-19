@@ -272,8 +272,36 @@ def install_liability_rating(surfaces) -> dict:
     }
 
 
+def _repo_has_untrusted_ingress(scan) -> bool:
+    """True if the scanned repo exposes an untrusted ingress (HTTP route, webhook, queue/store read,
+    request body/params ...). Detected in repo_scanner via patterns.INGRESS_PATTERNS (now including web-
+    route decorators). An install-liability candidate with NO traced in-repo caller cannot honestly be
+    called 'inert here' when such an ingress exists — an untrusted request may reach the sink along a
+    dispatch path the static tracer could not resolve. NEVER print an analysis LIMIT as a safety FACT."""
+    return bool(scan.get("ingresses"))
+
+
+_UNRESOLVED_DISPATCH_MODES = {"ast_dynamic_dispatch"}
+
+
+def _repo_has_unresolved_dispatch(surfaces) -> bool:
+    """True if the repo contains dynamic / cross-module dispatch the static tracer could NOT resolve
+    (registry lookup TOOLS[name], getattr-bound call, dict-of-handlers, unresolved cross-module edge).
+    Such a dispatch can carry untrusted input from an ingress into a critical sink along a path taint
+    could not follow — so a 'no traced caller' sink is reachability-UNKNOWN, not proven inert."""
+    for s in surfaces:
+        if getattr(s, "capability", "") == "dynamic_dispatch":
+            return True
+        if getattr(s, "sink_detection_mode", "") in _UNRESOLVED_DISPATCH_MODES:
+            return True
+        ga = getattr(s, "guard_attribution", None) or {}
+        if isinstance(ga, dict) and ga.get("resolution_limits"):
+            return True
+    return False
+
+
 def verdict_band(reachable: int, proven: int, install_liab: int, amber_actions: int = 0,
-                 fixed_dest_reviews: int = 0) -> dict:
+                 fixed_dest_reviews: int = 0, reachability_unknown: int = 0) -> dict:
     """Canonical RED / AMBER / BLUE verdict — the SINGLE source of truth shared by the customer HTML report
     (shield_report.build_html) and the CLI live experience (live_scan). The thresholds must never diverge,
     so both call THIS function:
@@ -303,6 +331,11 @@ def verdict_band(reachable: int, proven: int, install_liab: int, amber_actions: 
         return {"code": "red", "icon": "⚠", "head": "Action needed"}
     if amber_actions > 0 or fixed_dest_reviews > 0:
         return {"code": "amber", "icon": "▲", "head": "Reachable actions — review"}
+    # REACHABILITY_UNKNOWN — a critical sink we could NOT prove inert (untrusted ingress and/or unresolved
+    # dynamic dispatch present, so a path may reach it). NEVER BLUE: an unproven path must never read as an
+    # absolute safety claim. Distinct AMBER head — "verify manually", not "inert here".
+    if reachability_unknown > 0:
+        return {"code": "amber", "icon": "▲", "head": "Reachability not proven — verify manually"}
     if install_liab > 0:
         return {"code": "amber", "icon": "▲", "head": "Review before you ship"}
     return {"code": "blue", "icon": "●", "head": "No live threat proven"}
@@ -351,8 +384,22 @@ def build_report(root, scan, validated=None) -> dict:
     candidate_crit = [s for s in grounded_crit if s.capability in _RCE_CAPS]
     # 1b. PROVEN-LIVE: only the human-traced + PoC-confirmed subset. Empty unless a validated set is supplied.
     proven_live = [s for s in surfaces if s.capability in _RCE_CAPS and _is_validated(s)]
-    # 2. INSTALL-LIABILITY: RCE-class sinks present but NOT grounded-critical (inert here, live on install).
-    install_liab = [s for s in surfaces if s.capability in _RCE_CAPS and s not in candidate_crit and not _is_validated(s)]
+    # 2. INSTALL-LIABILITY candidates: RCE-class sinks present but NOT grounded-critical, NOT proven-live.
+    _install_cand = [s for s in surfaces if s.capability in _RCE_CAPS and s not in candidate_crit and not _is_validated(s)]
+    # REACHABILITY-UNKNOWN split (honesty core — NEVER print an analysis LIMIT as a safety FACT). A candidate
+    # is only truly "inert here, live on install" when we can SEE that nothing reaches it. If the sink is
+    # itself tainted_reachable (it is LIVE here, not inert), OR the repo exposes an untrusted ingress (HTTP
+    # route, webhook, store read ...), OR it contains dynamic/cross-module dispatch the tracer could not
+    # resolve — then we CANNOT prove it inert. It becomes REACHABILITY_UNKNOWN ("reachability not proven —
+    # verify manually"), visually separate from genuine install-liability and never a "not reachable" claim.
+    _has_ingress = _repo_has_untrusted_ingress(scan)
+    _has_dispatch = _repo_has_unresolved_dispatch(surfaces)
+    reachability_unknown, install_liab = [], []
+    for s in _install_cand:
+        if getattr(s, "tainted_reachable", False) or _has_ingress or _has_dispatch:
+            reachability_unknown.append(s)
+        else:
+            install_liab.append(s)
     # broader inherited action capabilities (write/act) not proven-live
     act_liab = [s for s in surfaces if s.capability in _ACT_CAPS and getattr(s, "verdict", "") != "UNGUARDED_CRITICAL_LIVE_SINK"]
 
@@ -430,8 +477,14 @@ def build_report(root, scan, validated=None) -> dict:
         "reachable_fixed_dest_review": len(fixed_dest_reviews),  # fixed-dest messaging/external sends (AMBER, never BLUE)
         "gated_vulnerable": len(gated),                  # present but a guard/mitigation protects it
         "proven_live_poc": len(proven_live),             # human-traced + PoC-confirmed subset (never the raw count)
-        "install_liability_rce": len(install_liab),      # inert here, live on install
+        "install_liability_rce": len(install_liab),      # inert here, live on install (proven-inert only)
         "install_liability_rating": install_liability_rating(install_liab),   # OWASP band on the INHERITED (S8.86)
+        # REACHABILITY_UNKNOWN — RCE-class sink we could NOT prove inert (untrusted ingress and/or unresolved
+        # dynamic dispatch present). Distinct from install-liability: "reachability not proven — verify", not
+        # "inert here". Drives the AMBER verdict band (never BLUE / never a "not reachable" safety claim).
+        "reachability_unknown": len(reachability_unknown),
+        "reachability_unknown_reason": {"untrusted_ingress": _has_ingress, "unresolved_dispatch": _has_dispatch},
+        "reachability_unknown_items": [_row(s) for s in reachability_unknown[:50]],
         "language_mix": langs,
         "guard_model_note": ("python-only" if non_python else "python"),   # gated/non-gated only trustworthy for python
         # --- detail lists ---
@@ -470,11 +523,34 @@ def render(report: dict) -> str:
     L.append("Grounded-critical per the static scanner but NOT yet human/PoC-confirmed — some are false positives.")
     L.append("Never sent to anyone until a human traces + a PoC confirms each one.")
     L.append("")
+    # REACHABILITY_UNKNOWN — sinks we could NOT prove inert. Rendered as a DISTINCT band above install-
+    # liability so an unproven path never reads as an absolute safety claim. NEVER print an analysis LIMIT
+    # as a safety FACT: an untrusted ingress and/or unresolved dynamic dispatch means we cannot claim "not
+    # reachable" — the honest verdict is "verify manually".
+    ru = r.get("reachability_unknown", 0)
+    if ru:
+        rr = r.get("reachability_unknown_reason", {})
+        why = []
+        if rr.get("untrusted_ingress"):
+            why.append("an untrusted ingress (e.g. an HTTP route) is present")
+        if rr.get("unresolved_dispatch"):
+            why.append("dynamic/cross-module dispatch could not be resolved")
+        why_s = " and ".join(why) or "reachability could not be proven"
+        L.append(f"## 🟠 REACHABILITY UNKNOWN — verify manually: {ru}")
+        L.append("These RCE-class sinks are **NOT proven inert** in this repo. We could not trace an in-repo")
+        L.append(f"caller, but {why_s}, so an untrusted request may reach them along a path the static tracer")
+        L.append("could not follow. This is **reachability not proven — verify manually**, NOT 'inert here /")
+        L.append("not reachable'. A sink reachable from an untrusted route is live here, not install-liability.")
+        for it in r.get("reachability_unknown_items", []):
+            L.append(f"  - {it['file']}:{it['line']} [{it['capability']}]  — trace from the ingress + PoC to confirm")
+        L.append("")
     ilr = r.get("install_liability_rating", {})
     band = ilr.get("band", "Low")
     L.append(f"## 🟠 INSTALL-LIABILITY (RCE-class): {r['install_liability_rce']}  ·  inherited rating: {band}")
-    L.append("Inert in THIS repo (no local entrypoint reaches them) — but a live attack surface the moment a new")
-    L.append("user installs/wires this tool into an agent that feeds it untrusted input. The risk you INHERIT.")
+    L.append("Proven inert in THIS repo (no local entrypoint AND no untrusted ingress/unresolved dispatch reaches")
+    L.append("them) — but a live attack surface the moment a new user installs/wires this tool into an agent that")
+    L.append("feeds it untrusted input. The risk you INHERIT. (Sinks we could not prove inert are listed above")
+    L.append("under REACHABILITY UNKNOWN, not here.)")
     L.append(f"- **Inherited rating: {band}** — OWASP severity×likelihood at an as-installed likelihood "
              f"({ilr.get('as_installed_likelihood', 2)}); per-surface capped at Med (inert here). The "
              f"High band (≥100) is an aggregate-count signal of a large inherited attack surface, NOT a "

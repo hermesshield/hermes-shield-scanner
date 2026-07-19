@@ -188,6 +188,17 @@ def scan_file(path: Path, root: Path):
                 dest_info = _AST.analyse_destinations(_tree, _dest_caps, cli_main=_cli_main)
             except Exception:
                 dest_info = {}
+    # Fable-5 tainted-executable: for subprocess sinks, resolve whether the PROGRAM (argv0) is
+    # attacker-controlled. shell=False only strips shell parsing; a tainted argv0 is still arbitrary-program
+    # RCE, so it must stay RED and NOT be downgraded by guard_attribution's shell-form rule. {sink_line}.
+    subproc_tainted_exec = set()
+    if ast_ok and _tree is not None:
+        _subproc_lines = {sk["line"] for sk in ast_sinks if sk.get("capability") == "subprocess_exec"}
+        if _subproc_lines:
+            try:
+                subproc_tainted_exec = _AST.analyse_subprocess_executables(_tree, _subproc_lines, cli_main=_cli_main)
+            except Exception:
+                subproc_tainted_exec = set()
     if ast_ok:
         from collections import defaultdict
         # P2.9F-REVIEW census fix: a browser SUBMIT inside a dedicated DM-send module IS a direct
@@ -320,6 +331,8 @@ def scan_file(path: Path, root: Path):
                             surf.tainted_destination = _tdest
                         surf.auth_gated = sk.get("auth_gated", False)                 # FP4
                         surf.shell_form = sk.get("shell_form", True)                  # S8.46
+                        if cap == "subprocess_exec":                                   # Fable-5 tainted-executable
+                            surf.tainted_executable = surf.sink_line in subproc_tainted_exec
                         if cap == "code_exec" and sk["line"] in llm_eval_lines:        # S8.72 eval-on-LLM-output
                             surf.guard_proof["llm_output_eval"] = llm_eval_lines[sk["line"]]
                         surf.dedup_partition_id = pid

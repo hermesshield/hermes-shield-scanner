@@ -193,6 +193,21 @@ def annotate(root: Path, surfaces) -> dict:
             s.verdict = "GUARD_INTEGRITY_SUSPECT"
             s.live_promotion_verdict = "BLOCK"
             counts["suspect"] += 1
+        elif (gi["verdict"] == "GUARD_BLOCK_SHAPED_UNVERIFIED"
+              and "RETURN_BASED_MAY_BE_IGNORED" in gi["flags"]
+              and not s.guard_proof.get("guard_return_consumed", True)):
+            # fix B (provable discarded-return no-op): the guard DEFINITION communicates its decision ONLY
+            # via a return value (RETURN_BASED_MAY_BE_IGNORED, no raise/exit) AND the credited call site
+            # DISCARDS that return (guard_return_consumed is False — a bare call, return unbound). The two
+            # together are a DEMONSTRABLE no-op at this site: the decision is computed and thrown away, so the
+            # control cannot block. This is not "unverified" — it is provable — so it re-escalates to BLOCK
+            # (RED), never the ALLOW->REVIEW soft-downgrade that left it AMBER/install-liability.
+            s.guard_proof["integrity_warning"] = (
+                "control returns a decision that is DISCARDED at the call site (bare call, return unbound) — "
+                "a demonstrable no-op; the action is effectively unguarded")
+            s.verdict = "GUARD_INTEGRITY_SUSPECT"
+            s.live_promotion_verdict = "BLOCK"
+            counts["suspect"] += 1
         else:
             # BLOCK_SHAPED_UNVERIFIED or DEF_UNRESOLVED: honest — we cannot verify the gate works.
             s.guard_proof["integrity_review_required"] = True

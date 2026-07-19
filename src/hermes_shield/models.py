@@ -117,6 +117,10 @@ class ActionSurface:
     tainted_destination: bool = False
     auth_gated: bool = False
     shell_form: bool = True            # S8.46: subprocess is shell-interpreted (shell=True/os.system) -> a tainted arg is injectable
+    # Fable-5 tainted-executable: the PROGRAM (argv0 / command-list[0] / command string) is attacker-controlled.
+    # shell=False only removes shell-metacharacter parsing; it does NOT constrain which binary runs, so a tainted
+    # executable is still arbitrary-program RCE and must stay a live-promotion-blocking sink regardless of shell form.
+    tainted_executable: bool = False
     language: str = "python"          # S8.24 multi-language: python | typescript | ...
     # S2.4 AI-assist tier: static | ai_suspected (model-asserted, AST-line-verified) | ai_corroborated
     detection_source: str = "static"
