@@ -8,6 +8,7 @@ It never mutates the target repo and never takes a live action. Outputs are writ
 Usage:
   hermes-shield scan <repo>                  # deterministic core scan (default)
   hermes-shield scan <repo> --ai             # + AI-assist tier (recall booster; needs `claude` CLI)
+  hermes-shield scan <repo> --ai-deep        # + whole-repo agentic AI finder (advisory; needs `claude` CLI)
   hermes-shield scan <repo> --semgrep        # + semgrep comparator (multi-language breadth)
   hermes-shield scan                         # no target: enclosing git repo, or an interactive picker
   hermes-shield demo                         # scan a bundled deliberately-vulnerable toy agent (~10s)
@@ -244,6 +245,14 @@ def main(argv=None):
                                  "default; NOT part of --all. Only run this on a repo you trust.")
             sp.add_argument("--yes-execute-my-code", dest="yes_execute", action="store_true",
                             help="non-interactive consent for --prove (also: HERMES_SHIELD_PROVE_CONSENT=1)")
+            # Whole-repo AGENTIC AI finder (SEPARATE from --ai's per-file tier). Reads ACROSS the repo via the
+            # read-only agentic `claude` CLI to surface agent-plumbing static misses; findings are AST-verified
+            # and appended as ADVISORY ai_suspected surfaces, never in the deterministic headline. OFF by
+            # default => byte-identical scan. Degrades gracefully if `claude` is absent (like --ai).
+            sp.add_argument("--ai-deep", dest="ai_deep", action="store_true",
+                            help="enable the whole-repo agentic AI finder (advisory ai_suspected surfaces; "
+                                 "reads across the repo; non-deterministic; needs the `claude` CLI; OFF by "
+                                 "default). Env equivalent: HERMES_SHIELD_AI_FINDER=1.")
         sp.add_argument("--live", action="store_true",
                         help="opt-in cinematic live scan: a sticky HUD (climbing action-surface map + honest "
                              "signal tally) while scanning, then the on-screen 'collapse' narrowing to the "
@@ -313,6 +322,18 @@ def main(argv=None):
     # a plain --ai run is unchanged.
     if getattr(args, "ai_backend", None):
         os.environ["HERMES_SHIELD_AI_BACKEND"] = args.ai_backend
+    # --ai-deep is the whole-repo agentic finder gate. Like --ai it degrades gracefully: a missing `claude`
+    # CLI never blocks the core scan. When available it sets the env gate run_scan reads (propagated to the
+    # in-process scan_hermes.main call below via the shared os.environ) so the finder actually fires.
+    ai_deep = getattr(args, "ai_deep", False)
+    if ai_deep:
+        if _tool_available("claude"):
+            os.environ["HERMES_SHIELD_AI_FINDER"] = "1"
+        else:
+            print("hermes-shield: --ai-deep not available — the `claude` CLI is not installed/on PATH. "
+                  "Install Claude Code (https://claude.com/claude-code) and authenticate, then retry. "
+                  "Continuing with the deterministic core scan.", file=sys.stderr)
+            ai_deep = False
     if args.semgrep:
         if _tool_available("semgrep"):
             os.environ["HERMES_SHIELD_SEMGREP"] = "1"
@@ -343,6 +364,10 @@ def main(argv=None):
         passthrough += ["--prove"]
         if getattr(args, "yes_execute", False):
             passthrough += ["--yes-execute-my-code"]
+    # Pass --ai-deep through too (only when `claude` is present — see the graceful-degrade gate above) so the
+    # finder fires whether shield_cli reaches the engine in-process (shared env) or, in future, via subprocess.
+    if ai_deep:
+        passthrough += ["--ai-deep"]
     rc = scan_hermes.main(passthrough)
     if args.command in ("export-dashboard", "patch-plan") and not args.quiet:
         print("artefacts written under the scan output dir (default ./shield-report/outputs)")

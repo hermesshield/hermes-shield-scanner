@@ -519,11 +519,18 @@ def main(argv=None):
 
     if args.scan or args.diff:
         out_dir.mkdir(parents=True, exist_ok=True)
-        RW.write_json({"root": str(root), "head": head, "scan_time": scan_time,
-                       "files_scanned": scan["files_scanned"], "scanner_version": SCANNER_VERSION,
-                       "surfaces": [s.to_dict() for s in scan["surfaces"]],
-                       "ingresses": [i.to_dict() for i in scan["ingresses"]]},
-                      out_dir / "hermes_action_surface_scan.json")
+        _scan_doc = {"root": str(root), "head": head, "scan_time": scan_time,
+                     "files_scanned": scan["files_scanned"], "scanner_version": SCANNER_VERSION,
+                     "surfaces": [s.to_dict() for s in scan["surfaces"]],
+                     "ingresses": [i.to_dict() for i in scan["ingresses"]]}
+        # S7.4 FAIL-LOUD SURFACE: whenever --ai-deep ran (status "ok" OR "failed"), serialise the finder
+        # tier block (model/proposed/verified/added/deduped/fabrication_rate/status + any ai_finder_error)
+        # into the artefact, so a broken/refusing AI backend is never operator-indistinguishable from
+        # "finder ran, found nothing". When --ai-deep did NOT run, scan["ai_finder"] is {} and the key is
+        # OMITTED — the default scan JSON stays byte-identical.
+        if scan.get("ai_finder"):
+            _scan_doc["ai_finder"] = scan["ai_finder"]
+        RW.write_json(_scan_doc, out_dir / "hermes_action_surface_scan.json")
         RW.write_json({"rows": _matrix_rows(scan)}, out_dir / "hermes_lane_protection_matrix.json")
         RW.write_json([p.to_dict() for p in patch_items], out_dir / "hermes_patch_plan.json")
         RW.write_json(dashboard_export.build(scan, overall_drift, drift_findings, patch_items,
@@ -611,6 +618,18 @@ def main(argv=None):
                 _r = _IR.build_report(root, scan, validated)
                 print(f"  OWASP rating (proven-live): {_r['overall_rating']} · candidate-High: {_r['candidate_high']} · "
                       f"non-gated: {_r['non_gated_vulnerable']} · coverage: {_r['coverage_pct']}%")
+        # S7.4 FAIL-LOUD SURFACE: ONE console line whenever --ai-deep ran (ok OR failed) — printed for every
+        # render mode so a broken/refusing AI backend is never operator-indistinguishable from "found
+        # nothing". Absent by default (no --ai-deep => scan["ai_finder"] == {} => nothing printed).
+        _af = scan.get("ai_finder") or {}
+        if _af:
+            if _af.get("ai_finder_status") == "failed":
+                print(f"  AI finder: FAILED — {_af.get('ai_finder_error', 'unknown error')}")
+            else:
+                print(f"  AI finder: {_af.get('ai_finder_model')} · "
+                      f"proposed {_af.get('ai_finder_proposed')} · "
+                      f"verified {_af.get('ai_finder_verified')} · "
+                      f"added {_af.get('ai_finder_added')}")
     # --prove: a clear, honest separation of PROVEN-LIVE vs CANDIDATE vs refused-recipe. A refused finding
     # is STILL A REAL CANDIDATE (the lane declined to auto-execute it — non-drivable / non-Python / outside
     # the provable set), never "safe". Only printed when the lane actually ran (consent granted).

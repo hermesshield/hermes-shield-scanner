@@ -13,9 +13,13 @@ Locks the four contract points from the wiring task:
 """
 from __future__ import annotations
 
+import json
+import os
+
 import pytest
 
 from hermes_shield import scan_hermes as SH
+from hermes_shield import shield_cli as CLI
 from hermes_shield import ai_finder
 from hermes_shield import ai_verify
 from hermes_shield import install_report as IR
@@ -198,3 +202,280 @@ def test_finder_dedups_against_existing_surface(tmp_path, monkeypatch):
                  if s.file_path == "poster.py" and getattr(s, "detection_source", "static") == "ai_suspected"]
     assert poster_ai == [], "the finder must not double-report a sink static already covers"
     assert scan["ai_finder"]["ai_finder_deduped"] >= 1
+
+
+# --- (5) DE-MOCKED TRIGGER: the real --ai-deep flag path fires the finder end-to-end -----------------
+# These drive the ACTUAL trigger (env/flag -> finder block ENTERS -> ai_finder.find runs for real -> a
+# verified ai_suspected surface appears). Only the leaf claude-CLI subprocess is stubbed via _finder_agent;
+# ai_finder.find itself is NEVER monkeypatched — so these prove the trigger wiring, not just the append.
+
+def _spy_run_scan(monkeypatch):
+    """Wrap the REAL run_scan so a test can inspect the scan dict produced by an argv-driven main()."""
+    real = SH.run_scan
+    box = {}
+
+    def _spy(*a, **k):
+        r = real(*a, **k)
+        box["scan"] = r
+        return r
+
+    monkeypatch.setattr(SH, "run_scan", _spy)
+    return box
+
+
+def test_scan_hermes_ai_deep_flag_fires_finder(tmp_path, monkeypatch):
+    """`scan_hermes.main([... , '--ai-deep'])` must set the env gate BEFORE run_scan and drive the finder
+    block to append a verified advisory surface — without HERMES_SHIELD_AI_FINDER pre-set in the env."""
+    root = _repo(tmp_path)
+    monkeypatch.delenv("HERMES_SHIELD_AI_FINDER", raising=False)
+    monkeypatch.setattr(ai_finder, "_finder_agent", _stub_agent)   # stub only the leaf CLI, NOT find()
+    box = _spy_run_scan(monkeypatch)
+
+    rc = SH.main(["--scan", "--root", str(root), "--ai-deep",
+                  "--out", str(_out(tmp_path)), "--quiet"])
+    assert rc == 0
+    scan = box["scan"]
+    assert scan["ai_finder"]["ai_finder_status"] == "ok"
+    assert scan["ai_finder"]["ai_finder_added"] >= 1
+    assert any(getattr(s, "detection_source", "static") == "ai_suspected"
+               and s.file_path == "agent.py" for s in scan["surfaces"])
+
+
+def test_shield_cli_scan_ai_deep_fires_finder(tmp_path, monkeypatch):
+    """The SHIPPED CLI: `hermes-shield scan <repo> --ai-deep` must set the env gate and fire the finder
+    through the in-process scan_hermes call. `claude` availability is stubbed present."""
+    root = _repo(tmp_path)
+    monkeypatch.delenv("HERMES_SHIELD_AI_FINDER", raising=False)
+    monkeypatch.setattr(CLI, "_tool_available", lambda n: True)     # pretend claude is on PATH
+    monkeypatch.setattr(ai_finder, "_finder_agent", _stub_agent)    # stub only the leaf CLI, NOT find()
+    box = _spy_run_scan(monkeypatch)
+
+    rc = CLI.main(["scan", str(root), "--ai-deep", "--out", str(_out(tmp_path)), "--quiet"])
+    assert rc == 0
+    assert os.environ.get("HERMES_SHIELD_AI_FINDER") == "1"
+    scan = box["scan"]
+    assert scan["ai_finder"]["ai_finder_status"] == "ok"
+    assert scan["ai_finder"]["ai_finder_added"] >= 1
+    assert any(getattr(s, "detection_source", "static") == "ai_suspected"
+               and s.file_path == "agent.py" for s in scan["surfaces"])
+
+
+def test_shield_cli_ai_deep_graceful_degrade_without_claude(tmp_path, monkeypatch, capsys):
+    """No `claude` on PATH: --ai-deep must NOT set the finder gate and must NOT fire the finder; the core
+    deterministic scan still completes (fail-open, graceful degrade — mirrors --ai)."""
+    root = _repo(tmp_path)
+    monkeypatch.delenv("HERMES_SHIELD_AI_FINDER", raising=False)
+    monkeypatch.setattr(CLI, "_tool_available", lambda n: False)    # claude absent
+
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("finder backend must not be invoked when claude is absent")
+
+    monkeypatch.setattr(ai_finder, "_finder_agent", _must_not_run)
+    box = _spy_run_scan(monkeypatch)
+
+    rc = CLI.main(["scan", str(root), "--ai-deep", "--out", str(_out(tmp_path)), "--quiet"])
+    assert rc == 0
+    assert os.environ.get("HERMES_SHIELD_AI_FINDER") != "1"
+    assert box["scan"]["ai_finder"] == {}
+    assert "--ai-deep not available" in capsys.readouterr().err
+
+
+# --- (6) exit-0 content-refusal is fail-loud, not a silent zero ------------------------------------
+
+def test_exit0_content_refusal_raises(monkeypatch):
+    """A backend that AUP-refuses on STDOUT with exit code 0 (the observed claude-fable-5 behaviour) must
+    raise AIAgentError — NOT return '' that _parse turns into a silent []/status=ok."""
+    refusal = ("API Error: Fable 5's safeguards flagged this message as violating our usage policies. "
+               "Claude Code can't respond to this request with Fable 5. "
+               "https://www.anthropic.com/legal/aup")
+
+    class _Proc:
+        returncode = 0
+        stdout = refusal
+        stderr = ""
+
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run", lambda *a, **k: _Proc())
+    run = ai_finder._finder_agent("claude-fable-5", 5)
+    with pytest.raises(AIAgentError):
+        run("prompt", "/tmp")
+
+
+def test_wiring_records_failed_status_on_refusal(tmp_path, monkeypatch):
+    """End-to-end: an exit-0 refusal from the real _finder_agent surfaces a VISIBLE failed status via the
+    wiring (fail-loud tier) while the deterministic scan still completes (fail-open)."""
+    root = _repo(tmp_path)
+    monkeypatch.setenv("HERMES_SHIELD_AI_FINDER", "1")
+    refusal = "I can't respond to this request. https://www.anthropic.com/legal/aup"
+
+    class _Proc:
+        returncode = 0
+        stdout = refusal
+        stderr = ""
+
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run", lambda *a, **k: _Proc())
+    scan = SH.run_scan(root, out_dir=_out(tmp_path))
+
+    assert scan["ai_finder"]["ai_finder_status"] == "failed"
+    assert "refused" in scan["ai_finder"]["ai_finder_error"].lower()
+    assert not any(getattr(s, "detection_source", "static") == "ai_suspected" for s in scan["surfaces"])
+
+
+# --- (7) FAIL-LOUD SURFACE: the finder tier status reaches the JSON artefact + the console -----------
+# HIGH gap closed: ai_finder_status="failed" used to live ONLY in the in-memory scan dict, so in the
+# shipped CLI a broken/refusing AI backend was operator-indistinguishable from "ran, found nothing".
+
+_EXPECTED_DEFAULT_JSON_KEYS = {
+    "root", "head", "scan_time", "files_scanned", "scanner_version", "surfaces", "ingresses"}
+
+
+def test_json_artefact_omits_ai_finder_key_by_default(tmp_path, monkeypatch):
+    """Default scan (no --ai-deep): the JSON artefact must NOT carry an `ai_finder` key — the top-level
+    key set is byte-identical to the pre-change shape."""
+    root = _repo(tmp_path)
+    monkeypatch.delenv("HERMES_SHIELD_AI_FINDER", raising=False)
+    out = _out(tmp_path)
+    rc = SH.main(["--scan", "--root", str(root), "--out", str(out), "--quiet"])
+    assert rc == 0
+    doc = json.loads((out / "outputs" / "hermes_action_surface_scan.json").read_text(encoding="utf-8"))
+    assert "ai_finder" not in doc
+    assert set(doc) == _EXPECTED_DEFAULT_JSON_KEYS
+
+
+def test_failed_finder_status_in_json_artefact_and_console(tmp_path, monkeypatch, capsys):
+    """A broken backend under --ai-deep: the FAILED status + reason must appear IN the JSON artefact and
+    on ONE console line (not just the in-memory scan dict)."""
+    root = _repo(tmp_path)
+    monkeypatch.delenv("HERMES_SHIELD_AI_FINDER", raising=False)
+
+    def _broken_agent(*_a, **_k):
+        def run(_p, _c):
+            raise AIAgentError("claude finder CLI not found on PATH — install it")
+        return run
+
+    monkeypatch.setattr(ai_finder, "_finder_agent", _broken_agent)
+    out = _out(tmp_path)
+    # NB: no --quiet, so the console summary (and the new finder line) actually renders.
+    rc = SH.main(["--scan", "--root", str(root), "--ai-deep", "--out", str(out)])
+    assert rc == 0
+
+    doc = json.loads((out / "outputs" / "hermes_action_surface_scan.json").read_text(encoding="utf-8"))
+    assert doc["ai_finder"]["ai_finder_status"] == "failed"
+    assert "ai_finder_error" in doc["ai_finder"]
+
+    printed = capsys.readouterr().out
+    assert "AI finder: FAILED" in printed
+
+
+def test_ok_finder_status_in_json_artefact_and_console(tmp_path, monkeypatch, capsys):
+    """A finder that runs OK under --ai-deep: the ok status + counts appear in the JSON artefact and the
+    console line names the model + proposed/verified/added counts."""
+    root = _repo(tmp_path)
+    monkeypatch.delenv("HERMES_SHIELD_AI_FINDER", raising=False)
+    monkeypatch.setattr(ai_finder, "_finder_agent", _stub_agent)
+    out = _out(tmp_path)
+    rc = SH.main(["--scan", "--root", str(root), "--ai-deep", "--out", str(out)])
+    assert rc == 0
+
+    doc = json.loads((out / "outputs" / "hermes_action_surface_scan.json").read_text(encoding="utf-8"))
+    assert doc["ai_finder"]["ai_finder_status"] == "ok"
+    assert doc["ai_finder"]["ai_finder_added"] >= 1
+
+    printed = capsys.readouterr().out
+    assert "AI finder:" in printed and "FAILED" not in printed
+
+
+# --- (8) FIX 2: nonzero exit is a failure UNLESS a JSON array actually parsed ------------------------
+
+def _proc(returncode, stdout, stderr=""):
+    class _P:
+        pass
+    _P.returncode = returncode
+    _P.stdout = stdout
+    _P.stderr = stderr
+    return _P()
+
+
+def test_nonzero_exit_with_nonjson_stdout_raises(monkeypatch):
+    """FIX 2: a nonzero exit carrying NON-empty, non-JSON, non-refusal stdout must raise AIAgentError —
+    previously it fell through _parse -> [] -> status 'ok' (a silent zero)."""
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run",
+                        lambda *a, **k: _proc(1, "diagnostic chatter, no findings array here", "boom"))
+    run = ai_finder._finder_agent("sonnet", 5)
+    with pytest.raises(AIAgentError):
+        run("prompt", "/tmp")
+
+
+def test_nonzero_exit_with_valid_json_array_is_kept(monkeypatch):
+    """FIX 2: a nonzero exit that DID emit a valid JSON findings array is NOT a failure — it returns and
+    the findings parse (the one carve-out to the nonzero-exit rule)."""
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run", lambda *a, **k: _proc(2, _FAKE_FINDING, ""))
+    run = ai_finder._finder_agent("sonnet", 5)
+    out = run("prompt", "/tmp")
+    assert ai_finder._parse(out), "valid findings JSON on a nonzero exit must survive"
+
+
+def test_nonzero_exit_with_empty_stdout_still_raises(monkeypatch):
+    """FIX 2 regression: the original behaviour (nonzero exit + empty stdout -> raise) is preserved."""
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run", lambda *a, **k: _proc(3, "", "fatal: crashed"))
+    run = ai_finder._finder_agent("sonnet", 5)
+    with pytest.raises(AIAgentError):
+        run("prompt", "/tmp")
+
+
+def test_nonzero_exit_with_json_error_payload_raises(monkeypatch):
+    """FIX 2 hardening: a nonzero exit whose stdout is a JSON ERROR OBJECT carrying an embedded array span
+    (e.g. an overload / rate-limit error) must FAIL LOUD, not masquerade as an empty result. The guard now
+    requires a TOP-LEVEL JSON array, so the embedded `[]` in `{"...":[]}` no longer defeats it."""
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    overload = '{"type":"error","errors":[],"message":"overloaded_error: server overloaded"}'
+    assert ai_finder._is_toplevel_json_array(overload) is None       # object, not a top-level array
+    assert ai_finder._json_array(overload) == []                     # the embedded span DID parse (the old hole)
+    assert ai_finder._is_toplevel_json_array(_FAKE_FINDING) is not None  # a genuine array still trusted
+    monkeypatch.setattr(ai_finder.subprocess, "run", lambda *a, **k: _proc(1, overload, ""))
+    run = ai_finder._finder_agent("sonnet", 5)
+    with pytest.raises(AIAgentError):
+        run("prompt", "/tmp")
+
+
+# --- (9) FIX 3: a refusal with a stray bracket pair is still detected --------------------------------
+
+def test_is_refusal_truth_table():
+    """FIX 3: only a bracketed span that PARSES as a JSON array defeats the refusal check. Keeps the
+    existing true-negatives AND detects a refusal that merely contains a non-parsing '[x]'."""
+    # legitimate empty result — NOT a refusal
+    assert ai_finder._is_refusal("[]") is False
+    # a real findings array — NOT a refusal
+    assert ai_finder._is_refusal(_FAKE_FINDING) is False
+    # terse 'nothing' prose without a signature — NOT a refusal
+    assert ai_finder._is_refusal("found nothing") is False
+    # a real AUP refusal — IS a refusal
+    real = ("API Error: safeguards flagged this message as violating our usage policies. "
+            "Claude Code can't respond to this request. https://www.anthropic.com/legal/aup")
+    assert ai_finder._is_refusal(real) is True
+    # the FIX: a refusal carrying a stray, non-parsing bracket pair is STILL detected
+    assert ai_finder._is_refusal(
+        "I can't respond to this request [x] — usage policies. https://www.anthropic.com/legal/aup") is True
+
+
+def test_default_finder_model_is_not_fable(monkeypatch):
+    """Regression guard for B1: the default finder model must not be the AUP-refusing claude-fable-5.
+    find() must invoke the agent with the non-refusing default when no model/env override is given."""
+    monkeypatch.delenv("HERMES_SHIELD_FINDER_MODEL", raising=False)
+    seen = {}
+
+    def _capture_agent(model, timeout):
+        seen["model"] = model
+        return lambda _p, _c: "[]"
+
+    # drive find() with the default model resolution but a capturing agent factory
+    monkeypatch.setattr(ai_finder, "_finder_agent", _capture_agent)
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        ai_finder.find(d, static_surfaces=[])
+    assert seen["model"] != "claude-fable-5"
+    assert seen["model"] == "sonnet"
