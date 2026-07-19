@@ -173,6 +173,11 @@ def render_results(report: dict, scan: dict, out_dir, version: str, colour: bool
         return line
     L.append(row("Target", [(target, _A)]))
     L.append(row("Scanned", [(f"{files} files", _B), (f"   ·   {cov}% coverage" if cov != "" else "", _DIM)]))
+    # FOOTGUN GUARD: a zero-file scan is a NON-scan, never a clean bill — say so loudly, non-green.
+    if report.get("nothing_scanned"):
+        L.append("    " + c(_A + _B, "⚠ 0 files analysed — nothing was scanned"))
+        L.append("      " + c(_A, report.get("nothing_scanned_message", "Point the scanner at your source "
+                                             "tree. This is NOT a clean bill of health.")))
     L.append(row("Surfaces", [(f"{surfaces} action-surfaces mapped", _B)]))
     L.append("")
     L.append("    " + c(_O, "RISK"))

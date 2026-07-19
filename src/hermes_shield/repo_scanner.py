@@ -63,6 +63,25 @@ def _iter_py(root: Path):
         yield p
 
 
+_ALL_SOURCE_GLOBS = ("*.py", "*.ts", "*.tsx", "*.mts", "*.cts", "*.js", "*.mjs", "*.cs")
+
+
+def count_source_candidates(root: Path) -> Tuple[int, int]:
+    """FOOTGUN GUARD (Fable-5): count source files present under `root` vs how many the scanner would SKIP
+    (SKIP_DIRS: site-packages / .venv / vendor / node_modules ..., or dead/backup names). Used ONLY to
+    explain a `files_scanned == 0` result: were there source files that were all skipped (pointed at a
+    dependency/vendored tree), or is the tree genuinely empty of source? Cheap — walked once, only when the
+    scan analysed zero files. Never affects a normal scan."""
+    total = skipped = 0
+    for glob in _ALL_SOURCE_GLOBS:
+        for p in root.rglob(glob):
+            total += 1
+            parts = set(p.parts)
+            if parts & PAT.SKIP_DIRS or PAT.DEAD_FILE.search(p.name):
+                skipped += 1
+    return total, skipped
+
+
 def _function_ranges(tree) -> List[Tuple[int, int, str]]:
     out = []
     for n in ast.walk(tree):

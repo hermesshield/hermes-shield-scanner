@@ -21,6 +21,14 @@ from pathlib import Path
 from hermes_shield import scan_hermes, install_report as IR, guard_integrity as GI  # noqa: E402
 
 
+def _band(root, scan):
+    """The canonical antivirus banner band for a built report (RED/AMBER/BLUE — same fn the HTML + CLI use)."""
+    r = IR.build_report(root, scan)
+    return IR.verdict_band(r["non_gated_vulnerable"], r["proven_live_poc"], r["install_liability_rce"],
+                           r["reachable_amber_actions"], r["reachable_fixed_dest_review"],
+                           r["reachability_unknown"], nothing_scanned=r["nothing_scanned"]), r
+
+
 def _scan(root):
     return scan_hermes.run_scan(root)
 
@@ -189,6 +197,146 @@ def test_D_all_paths_guarded_downgrades(tmp_path):
         "    return _run_action(text)\n")
     s = _sink(_scan(tmp_path))
     assert not IR.is_non_gated_vulnerable(s)
+
+
+# ---- HOLE 1 (Fable-5 re-run) — assign-consumed-exit must respect statement ORDER --------------------
+def test_H1_assign_guard_consumed_AFTER_sink_stays_red(tmp_path):
+    # cmd -> assigned gate -> SINK runs UNCONDITIONALLY -> consuming `if not ok: raise` is AFTER the sink.
+    # The sink was already executed before any check, so the late branch must NOT credit it. RED.
+    (tmp_path / "app.py").write_text(
+        "from final_action_gate import allow_action\n"
+        "def handle_reply(cmd):\n"
+        "    ok = allow_action(cmd)\n"       # recognised gate, decision assigned
+        "    eval(cmd)\n"                    # SINK — runs before any check
+        "    if not ok:\n        raise RuntimeError('blocked')\n")   # consuming exit AFTER the sink
+    s = _sink(_scan(tmp_path))
+    assert s.guard_proof.get("status") != "proven"           # not credited
+    assert s.verdict == "UNGUARDED_CRITICAL_LIVE_SINK"        # RED
+    assert IR.is_non_gated_vulnerable(s)
+
+
+def test_H1_assign_guard_consumed_BEFORE_sink_still_downgrades(tmp_path):
+    # the genuine ordering: assign -> consuming early-exit -> THEN the sink. The gate dominates -> downgraded.
+    (tmp_path / "app.py").write_text(
+        "from final_action_gate import allow_action\n"
+        "def handle_reply(cmd):\n"
+        "    ok = allow_action(cmd)\n"
+        "    if not ok:\n        return None\n"    # consuming exit BEFORE the sink
+        "    eval(cmd)\n")
+    s = _sink(_scan(tmp_path))
+    assert s.guard_proof.get("status") == "proven"
+    assert not IR.is_non_gated_vulnerable(s)
+
+
+# ---- HOLE 2 (Fable-5 re-run) — assert-form must be UNCONDITIONALLY evaluated ------------------------
+def test_H2_assert_shortcircuit_operand_not_credited(tmp_path):
+    # `assert cmd or allow_action(cmd)` — when cmd is truthy the guard never runs (short-circuit). No credit.
+    (tmp_path / "app.py").write_text(
+        "from final_action_gate import allow_action\n"
+        "def handle_reply(cmd):\n"
+        "    assert cmd or allow_action(cmd)\n"
+        "    eval(cmd)\n")
+    s = _sink(_scan(tmp_path))
+    assert s.guard_proof.get("status") != "proven"
+    assert s.verdict == "UNGUARDED_CRITICAL_LIVE_SINK"       # RED
+    assert IR.is_non_gated_vulnerable(s)
+
+
+def test_H2_assert_tautology_not_credited(tmp_path):
+    # `assert allow_action(cmd) or True` — a tautology; the assert can never fire. No credit.
+    (tmp_path / "app.py").write_text(
+        "from final_action_gate import allow_action\n"
+        "def handle_reply(cmd):\n"
+        "    assert allow_action(cmd) or True\n"
+        "    eval(cmd)\n")
+    s = _sink(_scan(tmp_path))
+    assert s.guard_proof.get("status") != "proven"
+    assert s.verdict == "UNGUARDED_CRITICAL_LIVE_SINK"       # RED
+    assert IR.is_non_gated_vulnerable(s)
+
+
+def test_H2_genuine_assert_guard_still_downgrades(tmp_path):
+    # `assert allow_action(cmd)` — the guard IS the sole, unconditionally-evaluated operand -> credited.
+    (tmp_path / "app.py").write_text(
+        "from shield_kill_switch import assert_live_action_allowed\n"
+        "def handle_reply(cmd):\n"
+        "    assert assert_live_action_allowed(cmd)\n"
+        "    eval(cmd)\n")
+    s = _sink(_scan(tmp_path))
+    assert s.guard_proof.get("status") == "proven"
+    assert not IR.is_non_gated_vulnerable(s)
+
+
+# ---- MUST-NOT-OVER-CORRECT — the already-correct behaviours must be unchanged ----------------------
+def test_MSC_if_guard_after_sink_stays_red(tmp_path):
+    # `eval(cmd); if not allow_action(cmd): return` — the if-form guard is AFTER the sink -> RED (unchanged).
+    (tmp_path / "app.py").write_text(
+        "from final_action_gate import allow_action\n"
+        "def handle_reply(cmd):\n"
+        "    eval(cmd)\n"
+        "    if not allow_action(cmd):\n        return None\n")
+    s = _sink(_scan(tmp_path))
+    assert s.guard_proof.get("status") != "proven"
+    assert s.verdict == "UNGUARDED_CRITICAL_LIVE_SINK"
+    assert IR.is_non_gated_vulnerable(s)
+
+
+def test_MSC_if_not_guard_return_still_downgrades(tmp_path):
+    # `if not allow_action(cmd): return` then the sink — the canonical early-return gate -> downgraded.
+    (tmp_path / "app.py").write_text(
+        "from shield_kill_switch import allow_action\n"
+        "def handle_reply(cmd):\n"
+        "    if not allow_action(cmd):\n        return None\n"
+        "    eval(cmd)\n")
+    s = _sink(_scan(tmp_path))
+    assert s.guard_proof.get("status") == "proven"
+    assert not IR.is_non_gated_vulnerable(s)
+
+
+# ---- SHIP-BLOCKER 2 (Fable-5 re-run) — silent site-packages/vendored footgun fails LOUD --------------
+def test_FOOTGUN_all_vendored_fails_loud_not_green(tmp_path):
+    # A real RCE, but the ONLY files live under a dependency/vendored dir the scanner skips. Today this
+    # emitted an empty GREEN report (0 files -> no findings -> silent "safe"). It must FAIL LOUD instead.
+    vend = tmp_path / "site-packages" / "evil"
+    vend.mkdir(parents=True)
+    (vend / "mod.py").write_text(
+        "def handle(cmd):\n"
+        "    eval(cmd)\n")
+    scan = _scan(tmp_path)
+    assert scan["files_scanned"] == 0                        # nothing was analysed
+    band, r = _band(tmp_path, scan)
+    assert r["nothing_scanned"] is True
+    assert r["nothing_scanned_reason"] == "all_skipped_vendored"
+    assert band["code"] != "blue"                            # NON-green: never a silent PASS
+    assert "0 files analysed" in band["head"]
+    md = IR.render(r)
+    assert "NOTHING SCANNED" in md
+
+
+def test_FOOTGUN_empty_tree_fails_loud_not_green(tmp_path):
+    # No scannable source at all -> still a non-scan, still fails loud (never a clean bill).
+    (tmp_path / "README.md").write_text("# docs only\n")
+    scan = _scan(tmp_path)
+    assert scan["files_scanned"] == 0
+    band, r = _band(tmp_path, scan)
+    assert r["nothing_scanned"] is True
+    assert band["code"] != "blue"
+
+
+def test_FOOTGUN_clean_real_repo_still_reads_clean(tmp_path):
+    # MUST-NOT-OVER-CORRECT: a genuinely-clean REAL source repo (>0 files, no dangerous sink) is NOT a
+    # footgun — it scans normally and reads clean (blue), with no "nothing scanned" warning.
+    (tmp_path / "app.py").write_text(
+        "def add(a, b):\n"
+        "    return a + b\n"
+        "def greet(name):\n"
+        "    return 'hello ' + str(name)\n")
+    scan = _scan(tmp_path)
+    assert scan["files_scanned"] >= 1                        # real source was analysed
+    band, r = _band(tmp_path, scan)
+    assert r["nothing_scanned"] is False                     # NOT a false footgun warning
+    assert band["code"] == "blue"                            # clean reads clean
+    assert r["non_gated_vulnerable"] == 0
 
 
 if __name__ == "__main__":

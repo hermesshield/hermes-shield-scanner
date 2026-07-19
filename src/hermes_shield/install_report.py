@@ -301,7 +301,8 @@ def _repo_has_unresolved_dispatch(surfaces) -> bool:
 
 
 def verdict_band(reachable: int, proven: int, install_liab: int, amber_actions: int = 0,
-                 fixed_dest_reviews: int = 0, reachability_unknown: int = 0) -> dict:
+                 fixed_dest_reviews: int = 0, reachability_unknown: int = 0,
+                 nothing_scanned: bool = False) -> dict:
     """Canonical RED / AMBER / BLUE verdict — the SINGLE source of truth shared by the customer HTML report
     (shield_report.build_html) and the CLI live experience (live_scan). The thresholds must never diverge,
     so both call THIS function:
@@ -326,7 +327,15 @@ def verdict_band(reachable: int, proven: int, install_liab: int, amber_actions: 
 
     INVARIANT 3 (nothing reachable-unguarded returns to BLUE): a fixed-destination send demoted from the
     RED UNGUARDED_CRITICAL_LIVE_SINK lands here as `fixed_dest_reviews` and drives AMBER — it is never
-    counted by NO band and silently dropped to blue."""
+    counted by NO band and silently dropped to blue.
+
+    FOOTGUN GUARD (Fable-5 ship-blocker 2): `nothing_scanned` (files_scanned == 0 — every candidate file
+    was a dependency/vendored dir, or the tree has no source at all) FAILS LOUD as a NON-green band, never a
+    silent BLUE "no live threat proven". A zero-file scan analysed nothing, so it can make no safety claim.
+    This is checked FIRST — all count axes are 0 in this state anyway."""
+    if nothing_scanned:
+        return {"code": "amber", "icon": "▲",
+                "head": "0 files analysed — nothing was scanned"}
     if proven > 0 or reachable > 0:
         return {"code": "red", "icon": "⚠", "head": "Action needed"}
     if amber_actions > 0 or fixed_dest_reviews > 0:
@@ -403,7 +412,37 @@ def build_report(root, scan, validated=None) -> dict:
     # broader inherited action capabilities (write/act) not proven-live
     act_liab = [s for s in surfaces if s.capability in _ACT_CAPS and getattr(s, "verdict", "") != "UNGUARDED_CRITICAL_LIVE_SINK"]
 
-    coverage = _coverage_pct(root, scan.get("files_scanned", 0))
+    files_scanned = scan.get("files_scanned", 0)
+    coverage = _coverage_pct(root, files_scanned)
+
+    # FOOTGUN GUARD (Fable-5 ship-blocker 2): a scan that analysed ZERO files is NOT a clean bill — it is a
+    # non-scan. Today, pointing the scanner at a path under site-packages/.venv/vendor/node_modules skips
+    # every file and, with no findings, reads as a silent GREEN/BLUE "no live threat proven" — a false
+    # 'safe'. Detect files_scanned == 0 and FAIL LOUD (a non-green band + an explicit message). The trigger
+    # is "nothing analysed", NOT "no findings": a genuinely-clean REAL repo scans >0 files and still reads
+    # clean. When zero, distinguish "all candidate files were vendored/dep dirs" from "no source present".
+    nothing_scanned = files_scanned == 0
+    nothing_scanned_reason = ""
+    nothing_scanned_message = ""
+    if nothing_scanned:
+        try:
+            from . import repo_scanner as _RS
+            _cand_total, _cand_skipped = _RS.count_source_candidates(root)
+        except Exception:
+            _cand_total = _cand_skipped = 0
+        if _cand_total > 0 and _cand_skipped >= _cand_total:
+            nothing_scanned_reason = "all_skipped_vendored"
+            nothing_scanned_message = (
+                f"0 files analysed — nothing was scanned. All {_cand_total} candidate source "
+                "files are in dependency/vendored directories (site-packages / .venv / vendor / "
+                "node_modules ...) that the scanner skips. Point the scanner at your own source, or "
+                "pass an opt-in to include dependencies. This is NOT a clean bill of health.")
+        else:
+            nothing_scanned_reason = "no_source_files"
+            nothing_scanned_message = (
+                "0 files analysed — nothing was scanned. No scannable source files (Python / TS-JS / "
+                "C#) were found under this path. Point the scanner at your source tree. This is NOT a "
+                "clean bill of health.")
 
     # ---- OWASP risk rating -> the HEADLINE comes from PROVEN-LIVE ONLY (team ruling: a candidate must never
     # drive a severity badge). Candidate-High is counted SEPARATELY, shown un-badged as "needs validation". ----
@@ -468,8 +507,13 @@ def build_report(root, scan, validated=None) -> dict:
         "risk_ratings": risk_counts,               # PROVEN-only High/Med/Low
         "candidate_high": candidate_high,          # high-risk CANDIDATES (unvalidated, may include FPs) - needs validation
         # --- the locked metric model  ---
-        "files_scanned": scan.get("files_scanned", 0),
+        "files_scanned": files_scanned,
         "coverage_pct": coverage,
+        # FOOTGUN GUARD: files_scanned == 0 -> non-green, explicit "nothing was scanned" state (never a
+        # silent PASS). verdict_band(nothing_scanned=...) bands it amber; render() surfaces the message.
+        "nothing_scanned": nothing_scanned,
+        "nothing_scanned_reason": nothing_scanned_reason,
+        "nothing_scanned_message": nothing_scanned_message,
         "total_action_surfaces": total,
         "vulnerable_surfaces": len(vulnerable),
         "non_gated_vulnerable": len(non_gated),          # KICKER: live threat, no guard (RED)
@@ -502,6 +546,11 @@ def render(report: dict) -> str:
     L = []
     L.append(f"# Hermes Shield — action-surface report: {r['repo']}")
     L.append("")
+    # FOOTGUN GUARD: a zero-file scan fails loud at the TOP of the report — never a silent clean bill.
+    if r.get("nothing_scanned"):
+        L.append("## ⚠ NOTHING SCANNED — 0 files analysed")
+        L.append(f"> {r.get('nothing_scanned_message', '0 files analysed — nothing was scanned.')}")
+        L.append("")
     L.append(f"## OVERALL RISK: {r['overall_rating']}   (OWASP Severity x Likelihood — PROVEN-LIVE only)")
     L.append(f"- **Proven-live rated** — High:{rc['High']} · Med:{rc['Med']} · Low:{rc['Low']}")
     L.append(f"- **⚠ {r['candidate_high']} high-risk CANDIDATES** — unvalidated, may include false positives; need a human trace + PoC before they count. NOT a severity verdict.")

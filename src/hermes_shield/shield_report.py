@@ -385,7 +385,8 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     # (install-liability only), CALM BLUE (neither). Blue is "no live threat PROVEN", never "secure".
     # CANONICAL verdict — shared with the CLI (install_report.verdict_band) so the HTML banner and the CLI
     # can never disagree. This chooses the band/icon/head; the human-facing sub-copy is built per-band below.
-    _vb = IR.verdict_band(reachable, proven, install_liab, amber_actions, fixed_dest_reviews, reach_unknown)
+    _vb = IR.verdict_band(reachable, proven, install_liab, amber_actions, fixed_dest_reviews, reach_unknown,
+                          nothing_scanned=_ir.get("nothing_scanned", False))
     b_cls, b_icon, b_head = _vb["code"], _vb["icon"], _vb["head"]
     # Reason string for the reachability-unknown band — why we could not prove inert (never a safety claim).
     _ru_why = " and ".join(

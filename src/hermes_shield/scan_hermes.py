@@ -116,6 +116,22 @@ def run_scan(root: Path, progress=None, out_dir=None):
                              "trusted_by_operator": bool(_tg_trusted),
                              "status": "operator-trusted" if _tg_trusted else "advisory-only (untrusted)"}
     _emit(phase="map", done=True, files=scan["files_scanned"], surfaces=len(scan["surfaces"]))
+    # FOOTGUN GUARD (Fable-5 ship-blocker 2): FAIL LOUD to the console when the scan analysed ZERO files —
+    # pointing at a site-packages/.venv/vendor/node_modules path skips everything and would otherwise emit a
+    # silent clean report. This is a WARNING, never a PASS; the report band is set non-green in build_report.
+    if scan.get("files_scanned", 0) == 0:
+        try:
+            _ct, _sk = repo_scanner.count_source_candidates(root)
+        except Exception:
+            _ct = _sk = 0
+        if _ct > 0 and _sk >= _ct:
+            _why = (f"all {_ct} candidate source files are in dependency/vendored directories "
+                    "(site-packages / .venv / vendor / node_modules ...) that the scanner skips")
+        else:
+            _why = "no scannable source files (Python / TS-JS / C#) were found under this path"
+        print(f"WARNING: 0 files analysed — nothing was scanned ({_why}). This is NOT a clean bill of "
+              "health. Point the scanner at your source tree, or pass an opt-in to include dependencies.",
+              file=sys.stderr)
     # STRUCTURAL dedup redesign (Fable-5 band-suppression class): repo_scanner returns ONE display
     # representative per dedup partition but parks the OTHER raw sinks of the partition on it (._dedup_folded).
     # Merge those shadows into the surface set so the verdict passes (cross-module, taint, guard-attribution)

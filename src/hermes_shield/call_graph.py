@@ -257,13 +257,29 @@ class FileGraph:
                 r = self._resolve(stmt.value)
                 # credit ONLY when the assigned decision is consumed by a following dominating early-exit
                 # branch (`flag = guard(); if not flag: return`). A bare unused assignment is a no-op.
-                if r["strong"] and self._assign_consumed_exit(stmt, stmts[idx + 1:]):
-                    self._record_guard(stmt.lineno, stmt.value, "assign_branch")
-                    out.append((stmt.lineno, r["kind"], r["identity"], source))
+                # HOLE 1 FIX (Fable-5 re-run): the credited guard LINE is the CONSUMING EXIT BRANCH's line,
+                # NOT the assign line. The assign itself gates nothing — the `if not flag: return/raise/exit`
+                # is what aborts — so the guard only "runs before" a sink that comes AFTER that branch. Using
+                # the assign line let prove() credit a consuming branch that lies AFTER the sink (the sink
+                # ran unconditionally, then a late `if not ok: raise` gave bogus credit). prove() filters on
+                # guard_line < sink_line, so pinning the credit to the branch line makes a post-sink branch
+                # (branch_line > sink_line) correctly fail to dominate.
+                if r["strong"]:
+                    gl = self._assign_consumed_exit(stmt, stmts[idx + 1:])
+                    if gl is not None:
+                        self._record_guard(gl, stmt.value, "assign_branch")
+                        out.append((gl, r["kind"], r["identity"], source))
             elif isinstance(stmt, ast.Assert):
                 # `assert guard(...)` — the boolean is consumed (AssertionError on false) -> dominating.
+                # HOLE 2 FIX (Fable-5 re-run): the recognised guard must be UNCONDITIONALLY evaluated. Mirror
+                # the if-branch reasoning — reject a short-circuiting / tautological test where a truthy
+                # operand can skip past the guard: `assert cmd or allow_action(cmd)` (guard never runs when
+                # cmd is truthy) and `assert allow_action(cmd) or True` (tautology) each carry exactly one
+                # call yet the guard is not guaranteed to run. Only credit when the SOLE call in the test is
+                # the top-level operand (no ast.BoolOp / ast.IfExp anywhere in the test to short-circuit it).
+                short_circuit = any(isinstance(n, (ast.BoolOp, ast.IfExp)) for n in ast.walk(stmt.test))
                 calls = [c for c in ast.walk(stmt.test) if isinstance(c, ast.Call)]
-                if len(calls) == 1:
+                if len(calls) == 1 and not short_circuit:
                     r = self._resolve(calls[0])
                     if r["strong"]:
                         self._record_guard(stmt.lineno, calls[0], "assert")
@@ -287,18 +303,22 @@ class FileGraph:
                             out.append((gl, r["kind"], r["identity"], source + "_early_return"))
         return out
 
-    def _assign_consumed_exit(self, assign: ast.Assign, following) -> bool:
-        """fix A: True when an assigned guard result (`flag = guard()`) is CONSUMED by a following dominating
-        early-exit branch (`if not flag: return/raise/exit`). A bare, never-branched assignment is a no-op."""
+    def _assign_consumed_exit(self, assign: ast.Assign, following) -> Optional[int]:
+        """fix A + HOLE 1: return the LINE of the earliest following dominating early-exit branch that
+        CONSUMES an assigned guard result (`flag = guard(); ...; if not flag: return/raise/exit`), or None
+        when the assigned value is never consumed. The RETURNED line is the guard's credited dominance line —
+        the sink is only protected if it comes AFTER this branch (prove() filters guard_line < sink_line), so
+        a consuming branch that lies AFTER the sink cannot credit it. A bare, never-branched assignment is a
+        no-op (None)."""
         targets = {n.id for tg in assign.targets for n in ast.walk(tg) if isinstance(n, ast.Name)}
         if not targets:
-            return False
+            return None
         for s in following:
             if isinstance(s, ast.If) and _body_exits(s.body):
                 used = {n.id for n in ast.walk(s.test) if isinstance(n, ast.Name)}
                 if used & targets:
-                    return True
-        return False
+                    return s.lineno
+        return None
 
     def _guard_corresponds(self, guard_line: int, sink_vars: set) -> bool:
         """fix C (wrong-variable guard): a guard downgrades a sink only if it plausibly inspects the sink's

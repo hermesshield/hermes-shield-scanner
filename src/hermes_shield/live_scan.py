@@ -492,7 +492,8 @@ def render_finale(report: dict, scan: dict, out_dir, version: str, stream=None):
     amber_actions = sig["amber_actions"]
     fixed_dest_reviews = sig["fixed_dest_reviews"]
     reach_unknown = sig["reachability_unknown"]
-    vb = _IR.verdict_band(reachable, proven, install, amber_actions, fixed_dest_reviews, reach_unknown)
+    vb = _IR.verdict_band(reachable, proven, install, amber_actions, fixed_dest_reviews, reach_unknown,
+                          nothing_scanned=report.get("nothing_scanned", False))
     band_c = {"red": _HEAT, "amber": _A, "blue": _BLU}[vb["code"]]
 
     def w(s):
@@ -587,7 +588,8 @@ def render_quiet(report: dict, scan: dict, out_dir, stream=None):
     colour = _use_colour(stream)
     sig = signal_tally(report, scan)
     vb = _IR.verdict_band(sig["reachable"], sig["proven"], sig["install"], sig["amber_actions"],
-                          sig["fixed_dest_reviews"], sig["reachability_unknown"])
+                          sig["fixed_dest_reviews"], sig["reachability_unknown"],
+                          nothing_scanned=report.get("nothing_scanned", False))
     band_c = {"red": _HEAT, "amber": _A, "blue": _BLU}[vb["code"]]
     try:
         rel = os.path.relpath(str(out_dir), os.getcwd())
