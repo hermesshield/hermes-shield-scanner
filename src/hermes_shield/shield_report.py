@@ -47,6 +47,19 @@ _UNPROVEN = {"CALLER_GUARDED_NOT_PROVEN", "NEEDS_CALL_GRAPH", "NEEDS_ENTRYPOINT_
 _FIX_CATS = ("NO_GATE", "FAKE_GATE")
 _FIX_STATUS = "PLANNED — not applied"
 
+# Protected verdicts — patch_plan.build() skips EXACTLY these (a control is proven present), so the report's
+# fix plan skips them too. Everything else a static, prod, critical surface carries IS surfaced as a fix-plan
+# item at its real tier — so the buyer-facing fix-plan count reconciles with hermes_patch_plan.json and
+# nothing mapped is silently dropped from the plan (COMPLETENESS invariant).
+_PP_PROTECTED_VERDICTS = {"PROTECTED_FULL_PATH", "STATIC_PROOF_ONLY", "PROVIDER_SCOPE",
+                          "PROTECTED_TEXT_PATH_ONLY", "PASS_WITH_RESIDUAL_RISK"}
+
+# ONE HONEST CALLOUT beside every fix plan (Constitution: state as fact, not fear). A control written is not
+# a control proven — the ONLY way to KNOW a fix holds is to re-run the attack against it. Surfaced verbatim
+# in both the HTML and the MD report next to the plan.
+_PROOF_CALLOUT = ("A control applied is not a control proven — a plausible fix can still be bypassed; "
+                  "the only way to KNOW is to re-run the attack.")
+
 
 def _sink_ln(s) -> int:
     """Cite the SINK line (the dangerous call), matching hermes_shield_report.json's `line`. line_start is
@@ -159,13 +172,30 @@ def _fix_plan_rows(rows, scan=None):
         # the already-static headline rows, but we exclude non-static here too (belt and braces).
         if getattr(s, "detection_source", "static") != "static":
             continue
-        if cat not in _FIX_CATS:
+        # COMPLETENESS (buyer must see the whole plan): a surface is surfaced UNLESS it carries a protected
+        # verdict (a control is proven present — patch_plan.build skips exactly these too). This makes the
+        # fix-plan count reconcile with hermes_patch_plan.json; the old `cat in {NO_GATE,FAKE_GATE}` gate
+        # silently dropped genuine review findings (NEEDS_CERTIFICATION, fixed-dest sends) the JSON carried.
+        if getattr(s, "verdict", "") in _PP_PROTECTED_VERDICTS:
             continue
         cap = s.capability
-        if IR.is_non_gated_vulnerable(s):          # RED — reachable + unguarded, high blast-radius
+        # STEP 2 (the adversarial proof-test that ALREADY exists in hermes_patch_plan.json). Surfaced on
+        # EVERY fix row — it reframes the free directional advice (Step 1) as the EASY half: prove the sink
+        # is actually blocked by driving it with hostile input and asserting benign still passes.
+        suggested_test = _PP._suggested_test(cap)
+        if cat in ("UNPROVEN", "GATE_UNVERIFIED"):
+            # HELD (checked FIRST, before any fix-tier) — a control may ALREADY be present, or reachability
+            # could not be proven. We never tell you to change code that may already be protected; verify
+            # first. Counted (so the plan total reconciles with hermes_patch_plan.json), never surfaced as a
+            # fix instruction.
+            band, tier, reachable = "held", "held — control may already be present; verify, don't blind-change", False
+            control = ("A control may already be present here (or reachability is unproven) — verify with a "
+                       "test before you change anything. " + _PP.recommended_control(cap))
+        elif IR.is_non_gated_vulnerable(s):        # RED — reachable + unguarded, high blast-radius
             band, tier, reachable = "red", "reachable-in-repo", True
             control = _PP.recommended_control(cap)
-        elif IR.is_reachable_amber_action(s):      # AMBER — reachable + unguarded, reversible/social
+        elif IR.is_reachable_amber_action(s) or IR.is_reachable_fixed_dest_review(s):
+            # AMBER — reachable + unguarded, reversible/social OR fixed-destination send (review before ship)
             band, tier, reachable = "amber", "reachable action — review before you ship", True
             control = _PP.recommended_control(cap)
         elif cap in _RCE and (getattr(s, "tainted_reachable", False) or _has_ingress or _has_dispatch):
@@ -173,9 +203,15 @@ def _fix_plan_rows(rows, scan=None):
             # "inert here / gate on install"; verify reachability first, then apply the real fix-at-source.
             band, tier, reachable = "reach-unknown", "reachability unknown — verify, then gate", False
             control = "Reachability not proven (untrusted ingress / unresolved dispatch present) — trace from the ingress first. " + _PP.recommended_control(cap)
-        else:                                      # inert here — gate at wiring time, not a fix-now item
+        elif cap in _RCE:                          # RCE-class proven inert — gate at wiring time (install)
             band, tier, reachable = "wiring", "wiring-time — gate on install", False
             control = _PP.wiring_control(cap)
+        else:
+            # REVIEW — a critical action with NO control present whose reachability / live-capability we could
+            # not establish (e.g. NEEDS_CERTIFICATION, a fixed-dest send not proven tainted-reachable). Not
+            # "fix first" (not proven reachable) and NOT "inert" (not proven inert): certify, then gate.
+            band, tier, reachable = "review", "review — no control present; certify reachability & gate", False
+            control = _PP.recommended_control(cap)
         out.append({
             "file": s.file_path,
             "line": _sink_ln(s),
@@ -186,8 +222,17 @@ def _fix_plan_rows(rows, scan=None):
             "tier": tier,
             "category": cat,
             "recommended_control": control,
+            "suggested_test": suggested_test,
             "status": _FIX_STATUS,
         })
+    # SALIENCE: work top-to-bottom by band (red > amber > reach-unknown > review > wiring > held), then by
+    # capability severity so the hard sinks (RCE-class code_exec/deserialize/subprocess, severity 5) lead each
+    # band ABOVE the soft tool_invoke / xml_parse review items (severity 3). Deterministic file+line tie-break
+    # keeps output stable.
+    _band_order = {"red": 0, "amber": 1, "reach-unknown": 2, "review": 3, "wiring": 4, "held": 5}
+    out.sort(key=lambda it: (_band_order.get(it["band"], 9),
+                             -IR._SEVERITY.get(it["capability"], 3),
+                             it["file"], it["line"]))
     return out
 
 
@@ -222,22 +267,49 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
     except Exception:
         _install_liab, _install_band, _proven, _reach_unknown = 0, "Low", 0, 0
 
-    # Fix plan — generated, not applied. NO_GATE + FAKE_GATE only (see _fix_plan_rows scope).
+    # Fix plan — generated, not applied. Complete: every mapped surface except proven-protected ones appears
+    # (reconciles with hermes_patch_plan.json). Each row carries Step 1 (the control) AND Step 2 (the proof).
     _fixrows = _fix_plan_rows(rows, scan)
+    _fix_shown = [it for it in _fixrows if it["band"] != "held"]
+    _fix_held = [it for it in _fixrows if it["band"] == "held"]
 
     def _fix_md(limit=30):
         if not _fixrows:
             return "- (none — no no-control / fake-gate findings to plan)"
         lines = []
-        for it in _fixrows[:limit]:
+        for it in _fix_shown[:limit]:
             lines.append(
                 f"- `{it['file']}:{it['line']}` · **{it['cap_label']}** · tier: {it['tier']} · "
-                f"status: **{it['status']}**\n    - Recommended control: {it['recommended_control']}")
-        if len(_fixrows) > limit:
-            lines.append(f"- …and {len(_fixrows) - limit} more in `hermes_patch_plan.json`")
+                f"status: **{it['status']}**\n"
+                f"    - **Step 1 — apply the control:** {it['recommended_control']}\n"
+                f"    - **Step 2 — prove it's actually blocked:** a test that drives this sink with hostile "
+                f"input and asserts it's blocked (benign still passes). {it['suggested_test']}")
+        if len(_fix_shown) > limit:
+            lines.append(f"- …and {len(_fix_shown) - limit} more in `hermes_patch_plan.json`")
+        if _fix_held:
+            lines.append(
+                f"- _{len(_fix_held)} further item(s) are **held** from this plan — a control may already be "
+                f"present or reachability is unproven, so we do not tell you to change them; verify first "
+                f"(they remain in `hermes_patch_plan.json`)._")
         return "\n".join(lines)
 
     fix_md = _fix_md()
+    # QUANTIFY honestly (near the fix plan): the real work each sink demands, and what the Repairer delivers.
+    _n_fix = len(_fix_shown)
+    fix_quantify_md = (
+        f"**{_n_fix} {'sink' if _n_fix == 1 else 'sinks'} in this plan × (write a correct control + write a "
+        f"proof it blocks + re-verify closure).** The deterministic Repairer delivers each as a reviewed diff "
+        f"with the proof attached." if _n_fix else "")
+    # MOVE THE VALUE-ANCHOR UP — surface it beside the FIRST reachable-now finding (the moment of felt
+    # difficulty), not only at the bottom. Honest present tense, genuine value, a CTA. Rendered only when
+    # there is a reachable-now (red) fix item to anchor to.
+    _has_reach_now = any(it["band"] == "red" for it in _fix_shown)
+    repairer_anchor_md = ("" if not _has_reach_now else
+        "> **Each fix is really two jobs: write a correct control, then prove it blocks.** The deterministic "
+        "Repairer does both today on real repos — it applies the control as a reviewed diff, then re-runs the "
+        "real attack and proves this sink flips from exploitable to blocked (RED→PROTECTED), re-verified by "
+        "the same scanner (human-gated, never auto-fix). The AI-assist tier is in early access.\n"
+        "> → Early access: hermesshield.ai/repairer\n")
 
     disc = "\n".join(f"- **{cap}** — {n}" for cap, n in m["by_capability"].items()) or "- (none)"
     ai = m["ai_rows"]
@@ -284,16 +356,25 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
   **not demonstrated**, never "secure". A zero is the absence of a proof, not a clean bill of health.
 
 ## Fix plan — generated, not applied
-> Suggested fix-at-source controls for the confirmed no-control / fake-gate findings. **The scanner plans
-> these; it does not modify your code.** The Hermes Shield Repairer — the paid tier, in early access — is
-> being built to apply these under a human gate — never auto-fix. Until then each item is guidance you
-> apply and review.
+> Fix-at-source controls for the findings that need one. Each row is TWO steps: **Step 1** the control (the
+> free directional advice) and **Step 2** the adversarial proof-test that shows it actually blocks. **The
+> scanner plans these; it does not modify your code.**
+>
+> **A control applied is not a control proven — a plausible fix can still be bypassed; the only way to KNOW
+> is to re-run the attack.**
+>
+> {fix_quantify_md}
+> The **deterministic Repairer does this today on real repos**: it applies the control as a reviewed diff,
+> then **re-runs the real attack and proves the sink flips from exploitable to blocked (RED→PROTECTED),
+> re-verified by the same scanner** — under a human gate, never auto-fix. The **AI-assist tier is in early
+> access**.
 {fix_md}
 
 ## Discovered attack surfaces by capability
 {disc}
 
 ## 1. Actions with NO control — start here
+{repairer_anchor_md}
 {_list('NO_GATE')}
 
 ## 2. Gates that look FAKE — verify manually now
@@ -531,16 +612,27 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     _fix_reach = [it for it in _fixrows if it["band"] == "red"]
     _fix_amber = [it for it in _fixrows if it["band"] == "amber"]
     _fix_runknown = [it for it in _fixrows if it["band"] == "reach-unknown"]
+    _fix_review = [it for it in _fixrows if it["band"] == "review"]
     _fix_wiring = [it for it in _fixrows if it["band"] == "wiring"]
+    _fix_held = [it for it in _fixrows if it["band"] == "held"]
+    _fix_shown = [it for it in _fixrows if it["band"] != "held"]
 
     def fixplan_rows(items, badge, empty, limit=30):
         out = []
         for it in items[:limit]:
+            # EVERY fix row is TWO steps: Step 1 (the control — free directional advice) and Step 2 (the
+            # adversarial proof-test that ALREADY exists in hermes_patch_plan.json). Step 2 reframes the free
+            # advice as the EASY half — prove the sink is actually blocked, not just that a control is present.
+            ctrl = (f"<div class=fstep><span class=fsn>Step 1 — apply the control</span>"
+                    f"{esc(it['recommended_control'])}</div>"
+                    f"<div class=fstep><span class=fsn>Step 2 — prove it's actually blocked</span>"
+                    f"a test that drives this sink with hostile input and asserts it's blocked (benign still "
+                    f"passes). {esc(it['suggested_test'])}</div>")
             out.append(
                 f"<tr><td class=mono>{esc(it['file'])}<span class=ln>:{it['line']}</span></td>"
                 f"<td class=cap>{esc(it['cap_label'])}</td>"
                 f"<td class=tier2>{badge}</td>"
-                f"<td class=ctrl>{esc(it['recommended_control'])}</td>"
+                f"<td class=ctrl>{ctrl}</td>"
                 f"<td class=plan>{esc(it['status'])}</td></tr>")
         if len(items) > limit:
             out.append(f"<tr><td colspan=5 class=more>…and {len(items) - limit:,} more in the full plan "
@@ -576,6 +668,20 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         f"<table>{_fixhead}" + fixplan_rows(
             _fix_runknown, "<span class='badge ru'>reachability unknown — verify</span>", "(none)")
         + "</table>")
+    # REVIEW fix band — a critical action with NO control present whose reachability / live-capability we could
+    # NOT establish (e.g. NEEDS_CERTIFICATION, a fixed-destination send not proven tainted-reachable). Neither
+    # "fix first" (not proven reachable) nor "inert" (not proven inert): certify reachability, then gate.
+    # Surfaced (not silently dropped) so the buyer-facing plan is COMPLETE. Only shown when present.
+    fixplan_review_block = "" if not _fix_review else (
+        "<h3>Review — no control present, reachability not established "
+        "<span class=c>— certify reachability, then gate; not proven reachable, not proven inert</span></h3>"
+        "<div class=tier>These critical actions have <b>no control in front of them</b>, but we could not "
+        "establish whether an untrusted input reaches them. This is <b>not “fix first”</b> (not proven "
+        "reachable) and <b>not “inert”</b> (not proven inert). <b>Certify reachability, then gate each one "
+        "before you ship.</b></div>"
+        f"<table>{_fixhead}" + fixplan_rows(
+            _fix_review, "<span class='badge rw'>review — certify &amp; gate</span>", "(none)")
+        + "</table>")
     fixplan_wiring_block = "" if not _fix_wiring else (
         "<h3>Gate on install — wiring-time <span class=c>— inert here, not a fix-now item</span></h3>"
         "<div class=tier>These are <b>not reachable in this repo today</b>, so they are never labelled "
@@ -583,6 +689,41 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         f"<table>{_fixhead}" + fixplan_rows(
             _fix_wiring, "<span class='badge wt'>wiring-time — gate on install</span>", "(none)")
         + "</table>")
+    # HELD reconciliation — items in hermes_patch_plan.json we deliberately do NOT surface as a fix
+    # instruction because a control may already be present or reachability is unproven (we never tell you to
+    # change protected code). Stated plainly so the buyer-facing count is complete and honest.
+    fixplan_held_block = "" if not _fix_held else (
+        f"<div class=held><b>{len(_fix_held)} further {_pl(len(_fix_held), 'item', 'items')} "
+        f"held from this plan.</b> A control may already be present, or reachability could not be proven — so "
+        f"we do <b>not</b> tell you to change {_pl(len(_fix_held), 'it', 'them')}; verify first. "
+        f"{_pl(len(_fix_held), 'It remains', 'They remain')} in <code>hermes_patch_plan.json</code>.</div>")
+    # COMPLETENESS line — the buyer sees the whole plan reconcile against the machine-readable artefact.
+    _n_shown, _n_held = len(_fix_shown), len(_fix_held)
+    fixplan_count_html = (
+        f"<div class=fpcount><b>{_n_shown} fix-plan {_pl(_n_shown, 'item', 'items')}</b> below"
+        + (f", <b>{_n_held}</b> held" if _n_held else "")
+        + f" — every mapped surface that needs a control appears here, reconciled with "
+        f"<code>hermes_patch_plan.json</code> ({_n_shown + _n_held} total).</div>")
+    # QUANTIFY honestly — the real work each sink demands, and exactly what the Repairer delivers (present
+    # tense; the deterministic tier is real today, the AI tier is early access — never overclaimed).
+    fix_quantify_html = ("" if not _n_shown else (
+        f"<b>{_n_shown} {_pl(_n_shown, 'sink', 'sinks')} in this plan × (write a correct control + write a "
+        f"proof it blocks + re-verify closure).</b> The deterministic Repairer delivers each as a reviewed "
+        f"diff with the proof attached."))
+    # ONE HONEST CALLOUT beside the plan — fact, not fear (Constitution).
+    proof_callout_html = f"<div class=proofcall>{esc(_PROOF_CALLOUT)}</div>"
+    # MOVE THE VALUE-ANCHOR UP — a compact Repairer anchor beside the FIRST reachable-now finding (the moment
+    # of felt difficulty), not only the bottom CTA. Honest present tense + a CTA. Only when a red item exists.
+    _has_reach_now = any(it["band"] == "red" for it in _fix_shown)
+    repairer_anchor_html = ("" if not _has_reach_now else (
+        "<div class=anchor><div class=k>▸ the fix is two jobs — the Repairer does both</div>"
+        "<p><b>Writing a control is the easy half; proving it blocks is the half people skip.</b> The "
+        "<b>deterministic Repairer does both today on real repos</b>: it applies the control as a reviewed "
+        "diff, then <b>re-runs the real attack and proves this sink flips from exploitable to blocked "
+        "(RED→PROTECTED), re-verified by the same scanner</b> — human-gated, never auto-fix. The AI-assist "
+        "tier is in early access.</p>"
+        "<a class=link href=\"https://hermesshield.ai/repairer\">Early access → hermesshield.ai/repairer</a>"
+        "</div>"))
 
     # capability bars
     bycap = m["by_capability"]
@@ -767,6 +908,29 @@ text-transform:uppercase;padding:3px 9px;border-radius:999px;white-space:nowrap}
 .badge.rv{{color:var(--blaze);border:1px solid rgba(250,125,9,.5);background:rgba(250,125,9,.1)}}
 .badge.wt{{color:var(--blaze);border:1px solid rgba(250,125,9,.5);background:rgba(250,125,9,.1)}}
 .badge.ru{{color:var(--heat);border:1px solid rgba(255,67,1,.5);background:rgba(255,67,1,.1)}}
+.badge.rw{{color:var(--apricot);border:1px solid rgba(255,201,143,.5);background:rgba(255,201,143,.09)}}
+/* ---- fix-row two-step control cell (Step 1 = control, Step 2 = the proof-test) ---- */
+.fstep{{margin:0 0 8px}}.fstep:last-child{{margin-bottom:0}}
+.fsn{{display:block;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.08em;
+text-transform:uppercase;color:var(--blaze);margin-bottom:3px}}
+.fstep:last-child .fsn{{color:var(--sky)}}
+/* ---- the honest proof callout (fact, not fear) ---- */
+.proofcall{{background:rgba(82,189,255,.07);border:1px solid rgba(82,189,255,.32);border-left:4px solid var(--sky);
+border-radius:0 12px 12px 0;padding:14px 20px;margin:0 0 18px;color:var(--cream);font-size:14.5px;
+line-height:1.55;font-weight:500}}
+.fpcount{{color:var(--muted);font-size:13px;margin:0 0 14px}}.fpcount b{{color:var(--cream)}}
+.fpcount code,.held code{{font-family:var(--mono);color:var(--apricot)}}
+.held{{color:var(--muted);font-size:13.5px;background:var(--panel);border:1px solid var(--line);
+border-radius:12px;padding:14px 18px;margin:18px 0 0;line-height:1.6}}.held b{{color:var(--cream)}}
+/* ---- moved-up Repairer value-anchor (beside the first reachable-now finding) ---- */
+.anchor{{background:linear-gradient(135deg,rgba(250,125,9,.14),rgba(255,67,1,.05));
+border:1px solid rgba(250,125,9,.42);border-radius:16px;padding:20px 24px;margin:18px 0 0}}
+.anchor .k{{font-family:var(--mono);font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;
+color:var(--blaze);margin-bottom:6px}}
+.anchor p{{margin:8px 0 0;color:var(--muted);max-width:80ch;line-height:1.6;font-size:14.5px}}
+.anchor b{{color:var(--cream)}}
+.anchor .link{{display:inline-block;font-family:var(--mono);font-size:13.5px;color:var(--blaze);
+margin-top:12px;font-weight:600}}
 /* ---- the Repairer CTA ---- */
 .cta{{background:linear-gradient(135deg,rgba(250,125,9,.16),rgba(255,67,1,.06));
 border:1px solid rgba(250,125,9,.5);border-radius:20px;padding:28px 32px;margin:44px 0 0}}
@@ -833,6 +997,7 @@ executed · the deterministic core makes no network calls (optional --ai/--deps 
 <h2>▸ Reachable in-repo <span class=c>— live now, from this repo's own entrypoints (fix first)</span></h2>
 <div class=tier>An untrusted input can reach these dangerous actions with no control in the way, today.</div>
 <table>{rows(live)}</table>
+{repairer_anchor_html}
 
 {amber_band_html}
 
@@ -841,22 +1006,31 @@ executed · the deterministic core makes no network calls (optional --ai/--deps 
 {reach_unknown_html}
 
 <h2>▸ Fix plan <span class=c>— generated, not applied</span></h2>
-<div class=tier>Suggested fix-at-source controls for the confirmed no-control / fake-gate findings.
-<b>The scanner plans these; it does not modify your code.</b> The Hermes Shield Repairer — the paid tier,
-in early access — is being built to apply these under a human gate — never auto-fix. Until then each item
-is guidance you apply and review.</div>
+<div class=tier>Fix-at-source controls for the findings that need one — <b>every row is two steps</b>: Step 1
+the control (the free directional advice), Step 2 the adversarial proof-test that shows it actually blocks.
+<b>The scanner plans these; it does not modify your code.</b></div>
+{proof_callout_html}
+<div class=tier>{fix_quantify_html} The <b>deterministic Repairer does this today on real repos</b>: it applies
+the control as a reviewed diff, then <b>re-runs the real attack and proves the sink flips from exploitable
+to blocked (RED→PROTECTED), re-verified by the same scanner</b> — human-gated, never auto-fix. The
+<b>AI-assist tier is in early access</b>.</div>
+{fixplan_count_html}
 <h3>Fix first — reachable now <span class=c>— {len(_fix_reach)} {_pl(len(_fix_reach), 'item', 'items')} · classified by the same reachable-unguarded rule as the “Reachable in-repo” count above</span></h3>
 <table>{_fixhead}{fixplan_reach_html}</table>
 {fixplan_amber_block}
 {fixplan_runknown_block}
+{fixplan_review_block}
 {fixplan_wiring_block}
+{fixplan_held_block}
 
 <div class=cta>
   <div class=k>▸ what happens next</div>
-  <p><b>This report is the free Scanner.</b> It finds every action-surface and plans the fix.</p>
-  <p><b>The Hermes Shield Repairer is coming</b> — the paid tier (early access). It will turn each planned
-  control above into a reviewed code change: proposed as a diff, applied only when a human approves, then
-  re-scanned to confirm the gap is closed. Never auto-fix.</p>
+  <p><b>This report is the free Scanner.</b> It finds every action-surface and plans the fix — control plus
+  proof-test — for each one.</p>
+  <p><b>The Hermes Shield Repairer closes them.</b> The <b>deterministic Repairer works today on real
+  repos</b>: it turns each planned control into a reviewed diff, applied only when a human approves, then
+  <b>re-runs the real attack and proves the sink flips from exploitable to blocked (RED→PROTECTED),
+  re-verified by the same scanner</b>. Never auto-fix. The <b>AI-assist tier is in early access</b>.</p>
   <a class=link href="https://hermesshield.ai/repairer">Join the early-access list → hermesshield.ai/repairer</a>
 </div>
 

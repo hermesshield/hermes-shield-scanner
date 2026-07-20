@@ -197,11 +197,23 @@ _SEVERITY = {
     "payment": 4, "blockchain_tx": 4, "cloud_write": 4, "file_perms": 4, "email_send": 4, "dm": 4,
     "telegram_send": 4, "computer_use": 4, "browser_submit": 3,
     "external_write": 3, "file_write": 3, "file_delete": 3, "tool_invoke": 3, "publish_write": 3,
+    # XML/XXE-class review (etree.parse) — a soft review item, ranked BELOW the RCE-class (5) hard sinks and
+    # not object-deserialization; kept at the soft tool_invoke tier so it never headlines above pickle/exec.
+    "xml_parse": 3,
     # reversible / social agent-actions (AMBER band)
     "post": 3, "reply": 3, "comment": 2, "like": 2, "browser_click": 2, "browser_type": 2,
     "queue_mutation": 2,
 }
 _RATING_ORDER = {"Low": 0, "Med": 1, "High": 2}
+
+
+def _severity_sort_key(s):
+    """Display-ordering key (SALIENCE): hard sinks (RCE-class, severity 5) rank ABOVE soft review items
+    (tool_invoke / xml_parse, severity 3) so the report headline and top-risk lists lead with the most
+    dangerous capability. Deterministic file+line tie-break keeps rendered output stable."""
+    cap = getattr(s, "capability", "")
+    ln = getattr(s, "sink_line", 0) or getattr(s, "line_start", 0)
+    return (-_SEVERITY.get(cap, 3), getattr(s, "file_path", ""), ln)
 
 
 def risk_rating(capability, reachable, gated, poc, language="python", external_write_egress=False):
@@ -499,6 +511,13 @@ def build_report(root, scan, validated=None) -> dict:
     def _row(s):
         return {"file": s.file_path, "line": getattr(s, "sink_line", 0) or s.line_start,
                 "capability": s.capability, "verdict": getattr(s, "verdict", "")}
+
+    # SALIENCE: order the top-risk display lists by capability severity (RCE-class hard sinks first, soft
+    # tool_invoke/xml_parse review items last). Counts are len()-based and unaffected; only display order.
+    candidate_crit = sorted(candidate_crit, key=_severity_sort_key)
+    non_gated = sorted(non_gated, key=_severity_sort_key)
+    reachability_unknown = sorted(reachability_unknown, key=_severity_sort_key)
+    proven_live = sorted(proven_live, key=_severity_sort_key)
 
     return {
         "repo": root.name,

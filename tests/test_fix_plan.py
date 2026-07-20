@@ -62,21 +62,40 @@ def test_no_internal_lane_jargon_in_customer_output():
         assert "lane" not in PP.recommended_control(cap).lower()
 
 
-# ---- 2. scope: NO_GATE + FAKE_GATE only ----
+# ---- 2. scope: COMPLETE plan (reconciles with hermes_patch_plan.json), honestly tiered ----
+# The buyer must see the WHOLE plan. Only a PROVEN-protected verdict is dropped (patch_plan.build skips
+# exactly those too). Everything else is surfaced at its real tier — with two honesty rules:
+#   * UNPROVEN / GATE_UNVERIFIED are HELD: counted for completeness, but never turned into a fix instruction
+#     (a control may already be present / reachability unproven — we never tell you to change protected code);
+#   * a genuine review finding (e.g. NEEDS_CERTIFICATION) is SHOWN, not silently dropped.
 
-def test_fix_plan_scope_is_no_gate_and_fake_gate_only():
+def test_fix_plan_is_complete_and_honestly_tiered():
     rows = [
-        (_surf("code_exec"), "NO_GATE"),
-        (_surf("subprocess_exec"), "FAKE_GATE"),
-        (_surf("deserialize"), "UNPROVEN"),        # must be excluded
-        (_surf("ssti"), "GATE_UNVERIFIED"),        # must be excluded
-        (_surf("tool_invoke"), "OTHER"),           # must be excluded
+        (_surf("code_exec"), "NO_GATE"),                                           # reachable -> red (shown)
+        (_surf("subprocess_exec", verdict="GUARD_NOOP_CONFIRMED"), "FAKE_GATE"),    # fake gate  (shown)
+        (_surf("dashboard_mutation", verdict="NEEDS_CERTIFICATION",
+               tainted_reachable=False), "OTHER"),                                  # review     (shown)
+        (_surf("deserialize", verdict="CALLER_GUARDED_NOT_PROVEN"), "UNPROVEN"),    # HELD (counted)
+        (_surf("ssti", verdict="PROTECTED_BY_REVIEWED_ENTRYPOINT"), "GATE_UNVERIFIED"),  # HELD (counted)
+        (_surf("code_exec", verdict="PROTECTED_FULL_PATH",
+               file_path="pkg/safe.py"), "GATE_UNVERIFIED"),                        # PROTECTED -> dropped
     ]
     out = SR._fix_plan_rows(rows)
-    caps = {it["capability"] for it in out}
-    assert caps == {"code_exec", "subprocess_exec"}
-    # the excluded categories never leak a suggestion
-    assert "deserialize" not in caps and "ssti" not in caps and "tool_invoke" not in caps
+    shown = [it for it in out if it["band"] != "held"]
+    held = [it for it in out if it["band"] == "held"]
+
+    # PROTECTED verdict is the ONLY thing dropped (matches patch_plan.build's skip set)
+    assert len(out) == 5, "every non-protected surface must appear (shown or held) — completeness"
+    assert all("safe.py" != it["file"] for it in out), "a proven-protected verdict is never surfaced"
+
+    # shown findings carry their real, honest tier — the review finding is NOT dropped
+    shown_caps = {it["capability"] for it in shown}
+    assert shown_caps == {"code_exec", "subprocess_exec", "dashboard_mutation"}
+    review = next(it for it in shown if it["capability"] == "dashboard_mutation")
+    assert review["band"] == "review" and "certify" in review["tier"].lower()
+
+    # UNPROVEN / GATE_UNVERIFIED are HELD — counted, but never a fix instruction
+    assert {it["capability"] for it in held} == {"deserialize", "ssti"}
 
 
 # ---- 3. status string is exact ----

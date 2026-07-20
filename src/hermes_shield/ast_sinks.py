@@ -469,13 +469,89 @@ def _collect_danger_dispatch_vars(tree, mod_alias, inst_map, self_attrs):
     return module_danger, func_danger
 
 
+# ---- PRECISION ALLOWLIST (S-precision): benign call families that must NEVER be stamped a critical live
+# sink. This is an ALLOWLIST, not a denylist — we exclude ONLY calls we can positively recognise as benign
+# infrastructure, so the default stays fail-safe (an unrecognised call is never treated as benign). It fixes
+# the tool_invoke / library-aware over-fire (on an SDK like `mcp`, EVERY method on an mcp-rooted object was
+# stamped tool_invoke — a majority were benign serialisation/logging/string ops). It deliberately does NOT
+# touch the genuine agent-action surface that IS the product: tool.invoke/.run/_run, call_tool, run_tool,
+# use_tool, registry[name](), agent.run/execute, delegate, dispatch, kickoff, apply_async/delay, exec_module,
+# import_module, event-bus dispatch, or any hard sink — none of those verbs appear in the sets below.
+#
+# HARD-benign: structurally-safe verbs — benign even on a danger-lib receiver (a `.model_dump_json()` /
+# `.split()` / `.warning()` on an mcp object is still just serialisation/string/logging, never an action).
+_BENIGN_LOG_NAMES = {"debug", "info", "warning", "warn", "error", "exception", "critical", "log",
+                     "getLogger", "setLevel", "addHandler", "isEnabledFor"}
+_BENIGN_SERIALISE_NAMES = {"model_dump", "model_dump_json", "json", "to_json", "to_dict", "dict",
+                           "dumps", "__str__", "__repr__", "pformat"}
+_BENIGN_STRINGOP_NAMES = {"split", "rsplit", "splitlines", "join", "strip", "lstrip", "rstrip",
+                          "format", "format_map", "lower", "upper"}
+# status/progress helpers with NO recall value — hard-benign (even on a danger-lib receiver: a progress /
+# status notification on an mcp session is not an action).
+_BENIGN_STATUS_NAMES = {"set_status", "report_status", "set_state", "update_state",
+                        "set_progress", "update_progress", "set_stage", "mark_done", "heartbeat"}
+_HARD_BENIGN_NAMES = (_BENIGN_LOG_NAMES | _BENIGN_SERIALISE_NAMES | _BENIGN_STRINGOP_NAMES
+                      | _BENIGN_STATUS_NAMES)
+# STATUS-self-gated: `update_status` is benign ONLY on a self/cls receiver. NB: `api.update_status(text)`
+# is a real tweepy tweet post, so it stays a name-sink on a non-self receiver (see _NAME_SINKS).
+_STATUS_BENIGN_NAMES = {"update_status"}
+# TELEMETRY-benign: metric/telemetry verbs — benign UNLESS the receiver is a known danger-lib (`stripe.capture`
+# genuinely captures a payment), in which case defer to the library-aware matcher.
+_TELEMETRY_BENIGN_NAMES = {"capture", "track", "incr", "increment", "gauge", "timing", "histogram",
+                          "observe", "record_metric", "add_metric", "set_tag"}
+# NOTE (FN-2 evasion fix): the OLD blanket `_BENIGN_RECEIVERS` family (`logger`/`log`/`metrics`/`tracer`/
+# `statsd`/...) has been REMOVED. It silenced EVERY verb on a receiver with one of those names, so a malicious
+# author (we scan UNTRUSTED / AI-generated code) could evade detection by simply naming a dangerous receiver
+# `logger` — `logger.put_object` (cloud_write), `metrics.send_email` (email_send), `tracer.send_transaction`
+# (blockchain_tx), `logger = stripe.StripeClient(); logger.charge(...)` (payment) all disappeared. Benign
+# suppression is now VERB-scoped (below), never RECEIVER-name-scoped, and it only ever touches the weak generic
+# residue — a call that resolves to a SPECIFIC dangerous capability is never suppressed by any receiver name.
+
+# The WEAK GENERIC buckets — the ONLY classifications the benign allowlist may suppress. A call that resolves to
+# a SPECIFIC dangerous capability (payment/post/cloud_write/email_send/blockchain_tx/deserialize/subprocess_exec/
+# dm/telegram_send/code_exec/dynamic_dispatch/...) is NEVER in this set and can never be silenced.
+_GENERIC_RESIDUE_CAPS = {"tool_invoke", "unknown_action"}
+# VERBS that are positively benign (logging / serialisation / string-op / telemetry / self-status). The benign
+# allowlist suppresses a generic-residue call ONLY when its method name is one of these. By construction NONE of
+# these is a dangerous verb (run / invoke / arun / call_tool / run_tool / charge / send_* / put_object / ... are
+# all absent), so a real agent-action surface can never be silenced by this list.
+_BENIGN_RESIDUE_VERBS = (_HARD_BENIGN_NAMES | _TELEMETRY_BENIGN_NAMES | _STATUS_BENIGN_NAMES)
+
+
 def _classify_call(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None,
                    alias_sinks=None, danger_vars=None, self_attrs=None):
+    """Classify a call, then apply the PRECISION ALLOWLIST as the LAST step (CORRECT DESIGN): the specific sink
+    matchers run FIRST and WIN, and benign suppression fires ONLY when they landed on the WEAK GENERIC bucket
+    (tool_invoke / unknown_action) AND the method name is itself benign (logging/serialisation/telemetry/self-
+    status). It can NEVER suppress a call that resolves to a specific dangerous capability, even when the
+    receiver is deceptively named `logger`/`metrics`/`tracer` (the FN-2 evasion the old allowlist enabled)."""
+    res = _classify_call_impl(node, sym_alias, mod_alias, inst_map, alias_sinks, danger_vars, self_attrs)
+    if res is None:
+        return None
+    if res[0] in _GENERIC_RESIDUE_CAPS:
+        bare = _attr_name(node.func)
+        # method-calls only (a bare builtin exec/eval/compile is never generic residue anyway); verb must be benign
+        if isinstance(node.func, ast.Attribute) and bare in _BENIGN_RESIDUE_VERBS:
+            return None
+    return res
+
+
+def _classify_call_impl(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None,
+                        alias_sinks=None, danger_vars=None, self_attrs=None):
     """Return (capability, mutating, sink_kind, static_artifact_type) or None if not a sink."""
     func = node.func
     bare = _attr_name(func)
     dotted = _dotted(func)
     chain = _chain_str(func)
+    # SELF/CLS STATUS PRE-FILTER (the ONE benign case that must beat a specific matcher): `self.update_status(...)`
+    # / `cls.update_status(...)` on a BARE self/cls receiver (attribute chain length EXACTLY 2) is the object's own
+    # status-tracking method, not a tweepy post. `update_status` is a name-sink (post), so this must run FIRST to
+    # win. FN-1 fix: keyed on the RECEIVER being exactly self/cls, NOT on the chain ROOT — `self.api.update_status`
+    # (chain length 3) is a real tweepy post and deliberately falls through to the name-sink matcher below.
+    if isinstance(func, ast.Attribute) and bare in _STATUS_BENIGN_NAMES:
+        _cparts = chain.split(".") if chain else []
+        if len(_cparts) == 2 and _cparts[0] in ("self", "cls"):
+            return None
     # resolve aliased/renamed imports to their dotted origin, then treat the origin as the identity
     rdotted = _resolve_dotted(func, sym_alias or {}, mod_alias or {})
     # NOTE (S3.1): SSRF (non-constant fetch URL) was reverted here — flagging EVERY variable-URL
@@ -550,8 +626,11 @@ def _classify_call(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None
         return "code_exec", True, "ast_call", None
 
     # ---- P5 discovery-corpus signatures (novel surfaces) ----
-    if dotted in _XXE_DOTTED:                                   # etree.parse(user_xml) -> XXE
-        return "deserialize", True, "ast_call", None
+    # XML parsing is an XXE-class review item, NOT object deserialization (pickle-class RCE). Re-labelled to a
+    # distinct, LOWER-severity capability so it never outranks a real pickle/exec/subprocess sink in the
+    # headline (salience fix). Mutating='unknown' — a parse is a read, surfaced for review, not a hard sink.
+    if dotted in _XXE_DOTTED:                                   # etree.parse(user_xml) -> XXE (XML external entity)
+        return "xml_parse", "unknown", "ast_xml_parse", "XML_PARSE_REVIEW"
     if dotted in _EXFIL_DOTTED:                                 # pyperclip.copy(secret) -> exfil
         return "external_write", True, "ast_call", None
     if dotted in ("socket.gethostbyname", "socket.getaddrinfo") and node.args and not isinstance(node.args[0], ast.Constant):

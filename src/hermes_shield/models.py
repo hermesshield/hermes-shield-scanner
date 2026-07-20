@@ -15,6 +15,7 @@ CAPABILITIES = [
     "deserialize", "code_exec", "cloud_write", "blockchain_tx", "payment", "file_perms", "tool_invoke", "dynamic_sql_review", "external_read", "dynamic_dispatch",
     # S3.1 chain-add review flags: SSRF (non-constant fetch URL) + RAG retrieval read-back source
     "ssrf_fetch", "knowledge_retrieval",
+    "xml_parse",   # XML/XXE-class review item (etree.parse/fromstring) — NOT pickle-class deserialization
     "ssti",   # S8.63 server-side template injection (render_template_string / jinja from_string on untrusted) -> RCE
     "secret_exfil",   # S8.72 secret serialised->egress / secret->LLM prompt (LangGrinch CVE-2025-68664 shape)
 ]

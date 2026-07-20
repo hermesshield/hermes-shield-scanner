@@ -25,6 +25,9 @@ _REMEDIATION = {
                     "needs them; block outbound traffic to non-allowlisted hosts.",
     "tool_invoke": "Put a final-action gate plus human approval on the tool dispatcher before any tool "
                    "call fires.",
+    "xml_parse": "Parse XML with a hardened parser that disables external entities and DTDs (e.g. "
+                 "defusedxml, or lxml with resolve_entities=False / no_network); never parse untrusted "
+                 "XML with entity resolution enabled (XXE -> file read / SSRF).",
     "external_write": "Gate outbound writes behind a destination allowlist plus human approval; never send "
                       "to a host derived from untrusted input.",
     "file_write": "Confine writes to an allowlisted directory, canonicalise the path and reject traversal; "

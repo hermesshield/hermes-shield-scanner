@@ -271,18 +271,32 @@ class FileGraph:
                         out.append((gl, r["kind"], r["identity"], source))
             elif isinstance(stmt, ast.Assert):
                 # `assert guard(...)` — the boolean is consumed (AssertionError on false) -> dominating.
-                # HOLE 2 FIX (Fable-5 re-run): the recognised guard must be UNCONDITIONALLY evaluated. Mirror
-                # the if-branch reasoning — reject a short-circuiting / tautological test where a truthy
-                # operand can skip past the guard: `assert cmd or allow_action(cmd)` (guard never runs when
-                # cmd is truthy) and `assert allow_action(cmd) or True` (tautology) each carry exactly one
-                # call yet the guard is not guaranteed to run. Only credit when the SOLE call in the test is
-                # the top-level operand (no ast.BoolOp / ast.IfExp anywhere in the test to short-circuit it).
-                short_circuit = any(isinstance(n, (ast.BoolOp, ast.IfExp)) for n in ast.walk(stmt.test))
+                # HOLE 2 FIX (Fable-5 re-run): the recognised guard must be UNCONDITIONALLY evaluated AND its
+                # truthiness genuinely required. Credit when EITHER:
+                #   (a) the SOLE call is the whole test (no BoolOp / IfExp) — `assert allow_action(cmd)`; OR
+                #   (b) the SOLE call is the FIRST value of a top-level `and` chain — `assert allow_action(cmd)
+                #       and cmd`. In an `and`, the first operand is always evaluated and its truthiness is
+                #       required for the assert to pass, so this genuinely gates.
+                # Still REJECT the short-circuit / tautology forms an attacker could satisfy without the guard:
+                #   `assert cmd or allow_action(cmd)` (guard skipped when cmd truthy), `assert allow_action(cmd)
+                #   or True` (tautology — any `or` chain), a guard NOT in first position of the `and`
+                #   (`assert cmd and allow_action(cmd)`), and any IfExp / nested BoolOp.
                 calls = [c for c in ast.walk(stmt.test) if isinstance(c, ast.Call)]
-                if len(calls) == 1 and not short_circuit:
-                    r = self._resolve(calls[0])
+                has_ifexp = any(isinstance(n, ast.IfExp) for n in ast.walk(stmt.test))
+                boolops = [n for n in ast.walk(stmt.test) if isinstance(n, ast.BoolOp)]
+                credit_call = None
+                if len(calls) == 1 and not has_ifexp:
+                    test = stmt.test
+                    if not boolops:
+                        credit_call = calls[0]                                  # (a) plain `assert guard(...)`
+                    elif (len(boolops) == 1 and isinstance(test, ast.BoolOp)
+                          and isinstance(test.op, ast.And) and test.values
+                          and test.values[0] is calls[0]):
+                        credit_call = calls[0]                                  # (b) first operand of top-level `and`
+                if credit_call is not None:
+                    r = self._resolve(credit_call)
                     if r["strong"]:
-                        self._record_guard(stmt.lineno, calls[0], "assert")
+                        self._record_guard(stmt.lineno, credit_call, "assert")
                         out.append((stmt.lineno, r["kind"], r["identity"], source + "_assert"))
             elif isinstance(stmt, ast.If):
                 # early-exit guard: `if <guard-test>: return/raise/exit`. SOUND only if (a) the guarded

@@ -44,6 +44,16 @@ def classify(s: ActionSurface, certified_lanes=None) -> ActionSurface:
             s.verdict = "READ_ONLY_SURFACE"; s.scope = "static_proof_only"
         s.live_promotion_verdict = _promotion(s.verdict); return s
 
+    # 2b) xml_parse (etree.parse / fromstring): an XXE / external-entity / file-read / SSRF review item — NOT a
+    # pickle-class RCE and NOT a live-action sink. Surface it as a genuine "review manually" verdict (REVIEW
+    # tier), instead of letting it fall through to PASS_WITH_RESIDUAL_RISK (which under-states XXE/file-read/SSRF)
+    # or into a critical headline (it is not one).
+    if s.capability == "xml_parse":
+        s.scope = "residual"; s.verdict = "HUMAN_REVIEW_ONLY"
+        s.patch_recommendations.append(
+            "Parse XML with a hardened parser that disables external entities and DTDs (XXE / file-read / SSRF review)")
+        s.live_promotion_verdict = _promotion(s.verdict); return s
+
     critical = s.capability in PAT.CRITICAL_CAPS
     fenced = g.untrusted_fence
 
