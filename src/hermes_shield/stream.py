@@ -72,6 +72,7 @@ def stream_scan(run_fn, stream=None):
     ticked: set = set()
     tick_count = 0
     pstart = time.time()
+    ai_active = False    # while an AI phase runs, its live feed owns STDERR — quiet our STDOUT live line
     pending: list = []   # permanent lines to print above the live line
 
     def w(s):
@@ -107,6 +108,17 @@ def stream_scan(run_fn, stream=None):
                     if ev.get("_end"):
                         raise StopIteration
                     ph = ev.get("phase")
+                    if ph == "ai":
+                        # the AI phase renders its own live feed on STDERR; quiet our STDOUT live line so the
+                        # two never fight the same TTY row, and drop a permanent header/footer around it.
+                        if ev.get("start"):
+                            ai_active = True
+                            pending.append(("hdr", "ai"))
+                        elif ev.get("done"):
+                            ai_active = False
+                            pending.append(("done", f"  {_GRN}✓{_R} {_B}AI phase complete{_R}"
+                                            f"   {_DIM}· advisory ai_suspected surfaces{_R}"))
+                        continue
                     if ev.get("start"):
                         phase = ph
                         pstart = time.time()
@@ -159,8 +171,9 @@ def stream_scan(run_fn, stream=None):
                 _flush(w, clear, pending)
                 pending.clear()
 
-            clear()
-            w(live_line())
+            if not ai_active:      # while AI owns STDERR, leave the STDOUT live line quiet
+                clear()
+                w(live_line())
             stream.flush()
             time.sleep(0.08)
     finally:
@@ -179,7 +192,8 @@ def _flush(w, clear, pending):
     for kind, payload in pending:
         if kind == "hdr":
             label = {"map": "1/3  Mapping action-surfaces",
-                     "reach": "2/3  Tracing reachability & attributing guards"}.get(payload, payload)
+                     "reach": "2/3  Tracing reachability & attributing guards",
+                     "ai": "3/3  AI phase · live feed on stderr"}.get(payload, payload)
             w(f"  {_O}▸ {label}{_R}\n")
         else:
             w(payload + "\n")

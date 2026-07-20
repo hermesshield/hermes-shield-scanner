@@ -3,6 +3,11 @@
 This is the evidence behind the README line: **12 open-source agent frameworks · 361k+ combined GitHub
 stars · 8,509 action surfaces mapped · 474 proved reachable · 520 install-liability**.
 
+> **HISTORIC — pre-v0.3.6 engine (record date 2026-07-08).** These counts are NOT current v0.8.0 output.
+> The current engine has higher recall and a revised verdict taxonomy (reachable, unguarded agent-action
+> sinks now band RED/AMBER, not BLUE), so a re-run reports **different — generally higher** — figures. A
+> refreshed 12-framework run on v0.8.0, re-stamped, is **pending** (see the reproduction note at the foot).
+
 Every framework was scanned **at a pinned commit** (the `@SHA` below), with the deterministic core plus a
 **cache-only** AI tier (`HERMES_SHIELD_AI_TIER=1` + `HERMES_SHIELD_AI_TIER_CACHE_ONLY=1`, `ai_calls == 0`
 asserted on every repo — no network). The numbers are a **de-inflation** of an earlier draft: the three
@@ -67,9 +72,4 @@ Later engine versions have strictly higher recall and, **as of v0.8.0**, a revis
 version will report **different — generally higher** — counts. To reproduce these **exact** figures, check
 out the engine as of the record date (the pre-v0.3.6 tree) and scan the same pinned commits. A refreshed
 12-framework run on v0.8.0, re-stamped, is **pending**.
-
-<!-- PROPOSED (pending Harley/Bill sign-off): before these numbers are quoted publicly again (README, site
-free-scan, truth.json, deck all cite them), either (a) re-run the full 12-framework benchmark on v0.8.0 and
-publish refreshed, version+date-stamped figures here as the single source of truth, or (b) keep this table
-explicitly marked "historic — pre-v0.3.6 engine". Do NOT quote 8,509 / 474 / 520 as current v0.8.0 output. -->
 

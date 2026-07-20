@@ -1,11 +1,20 @@
 {
+  "amber_action_items": [],
   "candidate_critical": {
-    "count": 0,
-    "items": []
+    "count": 1,
+    "items": [
+      {
+        "capability": "code_exec",
+        "file": "app.py",
+        "line": 9,
+        "verdict": "UNGUARDED_CRITICAL_LIVE_SINK"
+      }
+    ]
   },
-  "candidate_high": 0,
+  "candidate_high": 1,
   "coverage_pct": 100.0,
   "files_scanned": 2,
+  "fixed_dest_review_items": [],
   "gated_vulnerable": 0,
   "guard_model_note": "python",
   "install_liability_rating": {
@@ -16,28 +25,56 @@
       "Low": "<=16",
       "Med": "17-99"
     },
-    "count": 2,
+    "count": 0,
     "method": "severity x as-installed-likelihood(2); per-surface capped at Med; aggregate band by RCE-class count",
     "note": "inert here, live on install \u2014 the High band is an aggregate-count signal, never a per-surface reachable-here verdict",
     "per_surface": {
       "High": 0,
       "Low": 0,
-      "Med": 2
+      "Med": 0
     }
   },
-  "install_liability_rce": 2,
+  "install_liability_rce": 0,
   "language_mix": {
     "python": 4
   },
-  "non_gated_items": [],
-  "non_gated_vulnerable": 0,
+  "non_gated_items": [
+    {
+      "capability": "code_exec",
+      "file": "app.py",
+      "line": 9,
+      "verdict": "UNGUARDED_CRITICAL_LIVE_SINK"
+    }
+  ],
+  "non_gated_vulnerable": 1,
+  "nothing_scanned": false,
+  "nothing_scanned_message": "",
+  "nothing_scanned_reason": "",
   "overall_rating": "None (no proven-live)",
   "proven_live": {
     "count": 0,
     "items": []
   },
   "proven_live_poc": 0,
+  "reachability_unknown": 1,
+  "reachability_unknown_items": [
+    {
+      "capability": "subprocess_exec",
+      "file": "tools.py",
+      "line": 5,
+      "verdict": "BLOCK_LIVE_PROMOTION"
+    }
+  ],
+  "reachability_unknown_reason": {
+    "unresolved_dispatch": true,
+    "untrusted_ingress": true
+  },
+  "reachable_amber_actions": 0,
+  "reachable_fixed_dest_review": 0,
   "repo": "vulnerable_agent",
+  "repo_kind": "app",
+  "repo_kind_confidence": "high",
+  "repo_kind_reason": "runnable routes/webhooks present and no publish target \u2014 this runs its own entrypoints",
   "risk_ratings": {
     "High": 0,
     "Low": 0,

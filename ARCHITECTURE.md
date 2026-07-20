@@ -234,7 +234,7 @@ Optional, deterministic. Runs semgrep (the user's own install, or dockerised) as
 
 ## 7. Test posture
 
-- The `tests/` suite in this repository (51 test files, 463 test functions — run `pytest --collect-only` for the live count) covers: guard-attribution invariants, inter-procedural taint, cross-module proof, entrypoint maps, AST sink detection, false-positive suppression, adversarial red-team cases, a frozen corpus (`tests/corpus/` — labelled positive/negative fixtures), out-dir hygiene (artefacts never written into the package or the target), AI-tier cache-only guarantees, and the semgrep comparator isolation.
+- The `tests/` suite in this repository (59 test files, 575 tests collected — run `pytest --collect-only` for the live count; 517 run sandbox-free with 0 skips, the remaining 58 are the `--prove` / live-scan lanes that need a working bubblewrap sandbox) covers: guard-attribution invariants, inter-procedural taint, cross-module proof, entrypoint maps, AST sink detection, false-positive suppression, adversarial red-team cases, a frozen corpus (`tests/corpus/` — labelled positive/negative fixtures), out-dir hygiene (artefacts never written into the package or the target), AI-tier cache-only guarantees, and the semgrep comparator isolation.
 - `test_verified_fires.py` is the anti-drift gate: it asserts each wired detector actually **emits** on its positive fixture (eval-on-LLM-output, secret-exfil, SSTI) and that a benign file stays clean — turning "wired" into "verified-fires".
 - The corpus + mock lanes (`tests/mock_lanes/`) include deliberate decoys (no-op guards, comment/string guards, wrong-module name collisions) reflecting the "never over-credit" invariant.
 

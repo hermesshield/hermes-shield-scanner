@@ -236,6 +236,14 @@ def run_scan(root: Path, progress=None, out_dir=None):
                                        getattr(_s, "sink_line", 0) or _s.line_start))
     _emit(phase="reach", done=True, total=len(scan["surfaces"]))
 
+    # S8.95: the AI phases (per-file tier + whole-repo finder) shell out to the local `claude` CLI, which can
+    # block up to 600s. ai_stream renders a live feed on STDERR while they run; here we tell the STDOUT HUD
+    # (stream.py / live_scan.py) to QUIET its own spinner for the duration so the two live lines never fight
+    # the same TTY row. Emitted only when an AI phase will actually run; a no-op when `progress` is None.
+    _ai_phase_on = (os.getenv("HERMES_SHIELD_AI_TIER") == "1" or os.getenv("HERMES_SHIELD_AI_FINDER") == "1")
+    if _ai_phase_on:
+        _emit(phase="ai", start=True)
+
     # S2.4: AI-assist tier — flag-gated (HERMES_SHIELD_AI_TIER=1), residual-only, budget-capped, cached.
     # Appends model-proposed AST-verified surfaces as a SEPARATE ai_suspected tier; never touches the
     # static headline. Off by default so the deterministic scan is unchanged unless explicitly enabled.
@@ -384,6 +392,9 @@ def run_scan(root: Path, progress=None, out_dir=None):
             # record a VISIBLE failed status (never a silent zero) and let the deterministic scan complete.
             scan["ai_finder"] = {"ai_finder_status": "failed", "ai_finder_error": str(e)[:200]}
 
+    if _ai_phase_on:
+        _emit(phase="ai", done=True)
+
     # S8.90: dependency-aware tier — flag-gated (HERMES_SHIELD_DEPS=1), network, opt-in. Fetches the repo's
     # OWN pinned first-party packages (never third-party), scans capability packages with this same engine,
     # and reports their findings in a SEPARATE `install-inherited-via-dependency` tier — never merged into
@@ -479,6 +490,9 @@ def main(argv=None):
               "semgrep": os.getenv("HERMES_SHIELD_SEMGREP") == "1",
               "deps": os.getenv("HERMES_SHIELD_DEPS") == "1"}
     live = getattr(args, "live", False)
+    # --quiet suppresses the stdout HUD; keep it consistent by suppressing the STDERR AI live feed too.
+    if args.quiet:
+        os.environ.setdefault("HERMES_SHIELD_AI_NO_STREAM", "1")
     _run_fn = lambda progress=None: run_scan(root, progress=progress, out_dir=out_dir)
     if args.quiet:
         # --quiet is quiet whether or not --live is set (the one-line verdict prints after the scan).

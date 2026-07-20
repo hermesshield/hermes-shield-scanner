@@ -251,8 +251,9 @@ def main(argv=None):
             # default => byte-identical scan. Degrades gracefully if `claude` is absent (like --ai).
             sp.add_argument("--ai-deep", dest="ai_deep", action="store_true",
                             help="enable the whole-repo agentic AI finder (advisory ai_suspected surfaces; "
-                                 "reads across the repo; non-deterministic; needs the `claude` CLI; OFF by "
-                                 "default). Env equivalent: HERMES_SHIELD_AI_FINDER=1.")
+                                 "reads across the repo; non-deterministic; Claude-only for now — needs the "
+                                 "`claude` CLI, and --ai-backend does NOT apply to it; OFF by default). "
+                                 "Env equivalent: HERMES_SHIELD_AI_FINDER=1.")
         sp.add_argument("--live", action="store_true",
                         help="opt-in cinematic live scan: a sticky HUD (climbing action-surface map + honest "
                              "signal tally) while scanning, then the on-screen 'collapse' narrowing to the "

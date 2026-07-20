@@ -13,12 +13,12 @@
   "protected_full_path": 0,
   "provider_scope": 0,
   "residual": 0,
-  "scan_time": "2026-07-09T14:06:14+01:00",
-  "scanner_version": "0.1.0",
+  "scan_time": "2026-07-20T12:24:32+01:00",
+  "scanner_version": "0.8.0",
   "text_path_only": 0,
   "top_risks": [
     "code_exec @ app.py:7",
     "subprocess_exec @ tools.py:4"
   ],
-  "untrusted_ingresses": 0
+  "untrusted_ingresses": 1
 }

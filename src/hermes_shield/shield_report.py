@@ -60,6 +60,55 @@ _PP_PROTECTED_VERDICTS = {"PROTECTED_FULL_PATH", "STATIC_PROOF_ONLY", "PROVIDER_
 _PROOF_CALLOUT = ("A control applied is not a control proven — a plausible fix can still be bypassed; "
                   "the only way to KNOW is to re-run the attack.")
 
+# ---- PLAIN NAMES (rename engineer-speak; used identically in the MD and HTML report so the two skins
+# render the SAME taxonomy). "install-liability" is kept verbatim (it is a load-bearing product term).
+PLAIN = {
+    "action_surfaces": "dangerous actions your agent can take",
+    "reachable": "already reachable by untrusted input (unguarded)",
+    "reach_unknown": "needs a human trace — not proven safe",
+    "proven_live": "we made it fire (0 = untested, not a clean bill of health)",
+}
+
+
+def _reconciled_counts(m, ir) -> dict:
+    """The ONE reconciled count set both the MD and HTML report render from — install_report is the single
+    source of truth, so the banner, the scoreboard and the MD top-line can never disagree. `m` supplies the
+    mapped total (critical rows + review-manually rows); `ir` supplies every severity-bearing count."""
+    return {
+        "kind": ir.get("repo_kind", "library"),
+        "kind_reason": ir.get("repo_kind_reason", ""),
+        "kind_confidence": ir.get("repo_kind_confidence", "low"),
+        "mapped": m.get("mapped", m.get("total", 0)),
+        "reachable": ir.get("non_gated_vulnerable", 0),
+        "amber": ir.get("reachable_amber_actions", 0) + ir.get("reachable_fixed_dest_review", 0),
+        "reach_unknown": ir.get("reachability_unknown", 0),
+        "install_liab": ir.get("install_liability_rce", 0),
+        "install_band": (ir.get("install_liability_rating") or {}).get("band", "Low"),
+        "proven": ir.get("proven_live_poc", 0),
+        "review": len(m.get("review_rows", [])),
+        "ai": len(m.get("ai_rows", [])),
+    }
+
+
+def _exec_headline(c: dict) -> str:
+    """ONE reconciled headline sentence shared by both skins (plain text). Never reads 'you are okay': a low
+    reachable count is ALWAYS paired with the reachability-unknown count and the proven-live=0 caption."""
+    inst = ("install-liability N/A — nobody installs an app" if c["kind"] == "app"
+            else f"{c['install_liab']} inherited-on-install")
+    return (f"{c['mapped']} actions mapped; {c['reachable']} reachable-now; "
+            f"{c['reach_unknown']} need a human trace; {inst}; {c['proven']} proven-live.")
+
+
+def _exec_verdict(c: dict) -> str:
+    """ONE OWASP verdict sentence shared by both skins (plain text), stated as fact, never 'secure'."""
+    if c["proven"] > 0:
+        return (f"{c['proven']} proven-live — we demonstrated a real attack path. Act now.")
+    tail = "act now." if c["reachable"] else (
+        "verify the human-trace items before you rely on this being safe." if c["reach_unknown"]
+        else "this is not a clean bill of health — proven-live 0 means untested, not safe.")
+    return (f"No full exploit demonstrated (proven-live 0), but {c['reachable']} reachable with no control "
+            f"and {c['reach_unknown']} not proven safe — {tail}")
+
 
 def _sink_ln(s) -> int:
     """Cite the SINK line (the dangerous call), matching hermes_shield_report.json's `line`. line_start is
@@ -236,6 +285,19 @@ def _fix_plan_rows(rows, scan=None):
     return out
 
 
+def _fix_cards(scan):
+    """DE-NOISE the fix plan for the HUMAN report: collapse the FULL machine inventory (hermes_patch_plan.json,
+    one row per dangerous call site) into ONE fix-card per control point via patch_plan.group_plan. Returns
+    (groups, top5, inventory_count) so the report can render ~12-15 cards ("this one gate covers 388 call
+    sites") reconciled against the JSON, plus a leverage-ranked "FIX THESE FIRST" list. The inventory is never
+    mutated — grouping only."""
+    from . import patch_plan as _PP
+    prod = [s for s in scan.get("surfaces", []) if getattr(s, "context", "prod") == "prod"]
+    items = _PP.build(prod)
+    groups = _PP.group_plan(items)
+    return groups, _PP.top_fixes(groups, 5), len(items)
+
+
 def build_report(scan, repo_name: str, validated=None, root=None) -> str:
     """Markdown report (report #1 of the multi-report). `validated` (optional) = the PROVEN-LIVE set from
     the prove lane; when omitted (default) proven_live is 0 and the output is byte-identical to a plain
@@ -260,12 +322,27 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
     # the customer report cannot over-claim. These caveats are MANDATORY and appear verbatim in every scan.
     try:
         _ir = IR.build_report(Path(root) if root else Path("."), scan, validated)
-        _install_liab = _ir.get("install_liability_rce", 0)
-        _install_band = _ir.get("install_liability_rating", {}).get("band", "Low")
-        _proven = _ir.get("proven_live_poc", 0)
-        _reach_unknown = _ir.get("reachability_unknown", 0)
     except Exception:
-        _install_liab, _install_band, _proven, _reach_unknown = 0, "Low", 0, 0
+        _ir = {}
+    c = _reconciled_counts(m, _ir)
+    # SOURCE coverage (scanned source files / scannable source after SKIP_DIRS) — the SAME real figure the
+    # HTML skin prints under "% of scannable source". Kept DISTINCT from CONTROL coverage (m['coverage_pct']
+    # = gated/total critical sinks): the control number is never labelled "of scannable source".
+    _cov_src = _ir.get("coverage_pct", None)
+    _cov_src_note = f"{_cov_src}% of scannable source" if _cov_src is not None else "coverage: see report"
+    _install_liab = c["install_liab"]
+    _install_band = c["install_band"]
+    _proven = c["proven"]
+    _reach_unknown = c["reach_unknown"]
+    _reachable = c["reachable"]
+    # CONTEXT-AWARE install-liability line (kills the inverted "0 · Low" green badge in the MD skin too):
+    # an app's install-liability is N/A — nobody installs an app — never a residual-risk score on nothing.
+    if c["kind"] == "app":
+        _install_liab_line = "N/A — nobody installs an app (its risk is what is reachable now, above)"
+    elif _install_liab:
+        _install_liab_line = f"{_install_liab}  ·  inherited rating: {_install_band}"
+    else:
+        _install_liab_line = "0  (no RCE-class capability inherited on install)"
 
     # Fix plan — generated, not applied. Complete: every mapped surface except proven-protected ones appears
     # (reconciles with hermes_patch_plan.json). Each row carries Step 1 (the control) AND Step 2 (the proof).
@@ -273,7 +350,7 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
     _fix_shown = [it for it in _fixrows if it["band"] != "held"]
     _fix_held = [it for it in _fixrows if it["band"] == "held"]
 
-    def _fix_md(limit=30):
+    def _fix_md(limit=250):   # roll rows up (was capped at 30)
         if not _fixrows:
             return "- (none — no no-control / fake-gate findings to plan)"
         lines = []
@@ -294,6 +371,51 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
         return "\n".join(lines)
 
     fix_md = _fix_md()
+
+    # DE-NOISE — collapse the FULL inventory into ONE fix-card per control point, plus a leverage-ranked
+    # "FIX THESE FIRST — top 5". The machine feed (hermes_patch_plan.json) keeps every row; the human sees
+    # ~12-15 cards, each naming the ONE fix and the N call sites it closes.
+    _CLASS_LABEL = {"gate": "fix now — no control present", "review": "review — certify, then gate",
+                    "held": "held — verify first", "informational": "informational — no gate needed"}
+    _groups, _top5, _inv_n = _fix_cards(scan)
+
+    def _top5_md():
+        if not _top5:
+            return ""
+        lines = ["### FIX THESE FIRST — top 5 (ranked by leverage = sites-closed × severity)"]
+        for i, g in enumerate(_top5, 1):
+            lines.append(
+                f"{i}. **{g['control_point']}** — one fix closes **{g['count']} "
+                f"{'site' if g['count'] == 1 else 'sites'}** ({g['capability']}, severity {g['severity']}; "
+                f"leverage {g['leverage']}).")
+        return "\n".join(lines) + "\n"
+
+    def _cards_md():
+        if not _groups:
+            return "- (none — nothing to plan)"
+        lines = []
+        for g in _groups:
+            head = (f"- **{g['control_point']}** · {_CLASS_LABEL.get(g['fix_class'], g['fix_class'])} · "
+                    f"one fix closes **{g['count']} {'site' if g['count'] == 1 else 'sites'}** "
+                    f"({g['capability']})")
+            lines.append(head)
+            lines.append(f"    - **The one control:** {g['control']}")
+            if g["fix_class"] != "informational":
+                lines.append(
+                    f"    - **Prove it blocks:** {g['suggested_test']}")
+            _locs = g["locations"][:3]
+            _more = g["count"] - len(_locs)
+            _tail = f" …and {_more} more of this group in `hermes_patch_plan.json`" if _more > 0 else ""
+            lines.append(f"    - **Covers:** `{'`, `'.join(_locs)}`{_tail}")
+        return "\n".join(lines)
+
+    top5_md = _top5_md()
+    cards_md = _cards_md()
+    cards_reconcile_md = (
+        f"_**{len(_groups)} fix-{'card' if len(_groups) == 1 else 'cards'}** below de-noise the "
+        f"**{_inv_n}-row** machine inventory in `hermes_patch_plan.json` — grouped by the single control "
+        f"point each shares; every row is preserved in the JSON (the Repairer feed), nothing is dropped._")
+
     # QUANTIFY honestly (near the fix plan): the real work each sink demands, and what the Repairer delivers.
     _n_fix = len(_fix_shown)
     fix_quantify_md = (
@@ -324,83 +446,123 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
         ai_block = (f"> **AI tier: FAILED — {_ai_fail or 'agent backend error'}.** No AI findings were "
                     f"produced; the deterministic results above are unaffected.\n\n" + ai_block)
 
-    out = f"""# Hermes Shield — Discovery & Coverage Report
-**Repo:** `{m['repo']}`  ·  **Files scanned:** {m['files_scanned']}
+    from datetime import date as _dt_date
+    try:
+        from .models import SCANNER_VERSION as _ver
+    except Exception:
+        _ver = "unknown"
+    _scan_date = _dt_date.today().isoformat()
 
-> Read-only static analysis. Maps to OWASP LLM06 (Excessive Agency). It reports the dangerous ACTIONS an
-> AI agent could be tricked into, and whether a control is *written* before each — it does NOT prove a
-> control runs/blocks/is deployed. Findings marked _AI_ are model-proposed and MUST be human-verified.
+    # Reachable-now + reachability-unknown lists straight off install_report's items, so the rendered rows
+    # reconcile 1:1 with the scoreboard counts (never the MD's own re-derived taxonomy).
+    def _ir_list(items, note):
+        out_l = [f"- `{it['file']}:{it['line']}`  **{_CAP_LABEL.get(it['capability'], it['capability'])}**  {note}"
+                 for it in items]
+        return "\n".join(out_l) if out_l else "- (none)"
+    reach_md = _ir_list(_ir.get("non_gated_items", []), "_(reachable now — fix first)_")
+    runknown_md = _ir_list(_ir.get("reachability_unknown_items", []),
+                           "_(needs a human trace — not proven safe)_")
 
-## Summary
-- **Action-surfaces mapped (total):** {m.get('mapped', m['total'])}  (matches the HTML headline; every one appears below)
-- **Dangerous action-surfaces (critical capability):** {m['total']}
-- **Below the critical line — review manually:** {len(m.get('review_rows', []))}  (dynamic dispatch / REVIEW verdicts — mapped, not dropped)
-- **Have a control (present, unverified):** {m['gated']}  ({m['coverage_pct']}% coverage)
-- **NO control found:** {m['no_gate']}  (each fix-plan item below carries its real tier — fix-first, reachable-action review, or wiring-time)
-- **Gate looks FAKE (no-op / fail-open):** {m['fake']}
-- **AI-suspected surfaces (model-proposed, review):** {len(ai)}
-- **Reachability UNKNOWN (verify manually):** {_reach_unknown}  (RCE-class, could not be proven inert — untrusted ingress / unresolved dispatch present)
-- **Install-liability (RCE-class inherited, proven inert):** {_install_liab}  ·  inherited rating: {_install_band}
-- **Proven-live (PoC-confirmed) critical:** {_proven}
+    # SEVERITY-FIRST SCOREBOARD — each tile carries a severity word; the DANGEROUS number gets the loudest
+    # word, the harmless 0 the quietest. Context-aware: an app's install-liability is N/A, never a green 0.
+    def _sev_word(n, danger):
+        return danger if n else "none"
+    _sb = []
+    _sb.append(f"| Metric | Count | Severity |")
+    _sb.append(f"|---|---|---|")
+    _sb.append(f"| {PLAIN['action_surfaces']} (mapped) | **{c['mapped']}** | the map |")
+    _sb.append(f"| {PLAIN['reachable']} | **{_reachable}** | {_sev_word(_reachable, 'DANGEROUS — act now')} |")
+    _sb.append(f"| {PLAIN['reach_unknown']} | **{_reach_unknown}** | {_sev_word(_reach_unknown, 'UNRESOLVED — verify')} |")
+    _sb.append(f"| install-liability | {_install_liab_line} | "
+               f"{'N/A (app)' if c['kind'] == 'app' else _sev_word(_install_liab, 'inherited — gate on install')} |")
+    _sb.append(f"| {PLAIN['proven_live']} | **{_proven}** | {'PROVEN-LIVE' if _proven else 'not tested (not a clean bill)'} |")
+    _sb.append(f"| below-critical-line (review manually) | {c['review']} | review |")
+    _sb.append(f"| AI-suspected (advisory) | {c['ai']} | advisory — verify |")
+    scoreboard_md = "\n".join(_sb)
 
-## Honest scope — read this before you act
-- **Install-liability = inert here, live on install.** The {_install_liab} inherited RCE-class surfaces are
-  proven NOT reachable from this repo's own entrypoints today AND sit behind no untrusted ingress/unresolved
-  dispatch — they are inert here, live on install: a live attack surface the moment a downloader wires
-  untrusted input into them. This is NOT a "vulnerability" in this repo and is never reported as one.
-- **Reachability UNKNOWN = {_reach_unknown}.** {"No sink is in this state" if not _reach_unknown else f"{_reach_unknown} RCE-class sink(s) could NOT be proven inert"} — an untrusted
-  ingress (e.g. an HTTP route) and/or dynamic dispatch the tracer could not resolve is present, so a request
-  may reach them. This is **reachability not proven — verify manually**, never "not reachable". An analysis
-  limit is not a safety fact.
-- **Proven-live = {_proven}.** {"No critical finding here is PoC-confirmed" if not _proven else f"{_proven} critical finding(s) PoC-confirmed"} — proven_live_poc=0 means
-  **not demonstrated**, never "secure". A zero is the absence of a proof, not a clean bill of health.
+    out = f"""# Hermes Shield — Excessive-Agency Report
+<!-- SECTION 1 — COVER / IDENTITY -->
+**Repo:** `{m['repo']}`  ·  **Files scanned:** {m['files_scanned']}  ·  **Scanned:** {_scan_date}  ·  **Scanner:** v{_ver}
+**Repo kind:** `{c['kind']}` ({c['kind_confidence']} confidence — {c['kind_reason']})
 
-## Fix plan — generated, not applied
-> Fix-at-source controls for the findings that need one. Each row is TWO steps: **Step 1** the control (the
-> free directional advice) and **Step 2** the adversarial proof-test that shows it actually blocks. **The
-> scanner plans these; it does not modify your code.**
+> Read-only static analysis — the target code is never executed and the deterministic core makes no network
+> calls. Maps to **OWASP LLM06 (Excessive Agency)**: it reports the dangerous ACTIONS an AI agent could be
+> tricked into, and whether a control is *written* before each — it does NOT prove a control runs/blocks/is
+> deployed. Findings marked _AI_ are model-proposed and MUST be human-verified.
+
+## 2. Executive summary
+**{_exec_headline(c)}**
+
+**OWASP LLM06 verdict:** {_exec_verdict(c)}
+
+## 3. Severity-first scoreboard
+{scoreboard_md}
+
+- **{_reachable} with NO control found** — reachable now by untrusted input with nothing in the way; each
+  fix-plan item below carries its real tier (fix-first / reachable-action review / wiring-time).
+- **install-liability = inert here, live on install** — a dangerous capability that is harmless in this repo
+  but live the moment someone installs it and wires untrusted input to it. {"For an APP this is N/A: nobody installs an app." if c['kind'] == 'app' else "This is the risk you INHERIT on install — not a vulnerability in this repo."}
+- **proven-live = {_proven}** — proven_live=0 means **not demonstrated**, never "secure". A zero is the
+  absence of a proof, never a clean bill of health; it is **untested, not safe**.
+
+## 4. {PLAIN['reachable'].capitalize()} — start here
+> An untrusted input can reach these dangerous actions with no control in the way, today. Fix these first.
+{repairer_anchor_md}
+{reach_md}
+
+## 5. {PLAIN['reach_unknown'].capitalize()}
+> RCE-class sinks we could **not prove inert** — an untrusted ingress (e.g. an HTTP route) and/or dynamic
+> dispatch the tracer could not resolve is present, so a request may reach them along a path we could not
+> follow. This is **reachability not proven — verify manually**, never "not reachable". An analysis limit is
+> not a safety fact.
+{runknown_md}
+
+## 6. Fix plan — generated, not applied
+> Fix-at-source controls for the findings that need one. Each is TWO steps: **Step 1** the control, **Step 2**
+> the adversarial proof-test that shows it actually blocks.
+> **The scanner plans these; it does not modify your code.**
 >
-> **A control applied is not a control proven — a plausible fix can still be bypassed; the only way to KNOW
-> is to re-run the attack.**
+> **{_PROOF_CALLOUT}**
 >
 > {fix_quantify_md}
 > The **deterministic Repairer does this today on real repos**: it applies the control as a reviewed diff,
 > then **re-runs the real attack and proves the sink flips from exploitable to blocked (RED→PROTECTED),
 > re-verified by the same scanner** — under a human gate, never auto-fix. The **AI-assist tier is in early
-> access**.
+> access** (hermesshield.ai/repairer).
+
+{cards_reconcile_md}
+
+{top5_md}
+### Fix cards — one card per control point (fix these first: top 5, above)
+{cards_md}
+
+<details><summary>Full per-site fix rows (every call site — rolled up, not capped)</summary>
+
 {fix_md}
 
-## Discovered attack surfaces by capability
+</details>
+
+### Discovered attack surfaces by capability
 {disc}
 
-## 1. Actions with NO control — start here
-{repairer_anchor_md}
-{_list('NO_GATE')}
-
-## 2. Gates that look FAKE — verify manually now
-{_list('FAKE_GATE')}
-
-## 3. Controls we could not prove reach the action
-{_list('UNPROVEN')}
-
-## 4. Controls present but UNVERIFIED (polarity/reachability not machine-checked)
-{_list('GATE_UNVERIFIED')}
-
-## 5. Mapped — review manually (below the critical-capability line)
-> Surfaces we mapped but that sit below the critical-capability line — dynamic dispatch, REVIEW verdicts.
-> They are NOT dropped from the count (the headline total includes them); resolve the dispatch target and
-> verify manually. Deterministic (not AI-suspected).
-{_review_list()}
-
-## 6. AI-suspected surfaces — model-proposed, human MUST verify
-> Found by the AI-assist tier (any coding agent) on files the static rules missed, each AST-verified as a
-> real call. NOT counted in the coverage number above. Treat as leads to review, not confirmed findings.
+### AI-suspected surfaces — advisory, human MUST verify
+> Found by the optional AI-assist tier (any coding agent) on files the static rules missed, each AST-verified
+> as a real call. **NOT counted** in the scoreboard above — advisory only. Treat as leads to review, not
+> confirmed findings.
 {ai_block}
 
+## 7. Methodology, scope & honest blind spots
+Static excessive-agency analysis for OWASP LLM06: it assumes prompt-injection succeeds and maps what a
+hijacked agent could then DO — the target is read in place, never executed. Severity is **reachability-rated**:
+reachable-in-repo is live now; install-liability is inherited on wiring.
+
+**Blind spots (not covered — a "no finding" is not a proof of safety):** dynamic dispatch, runtime config,
+cross-process stores and non-Python surfaces are not reachability-reasoned. Source coverage ({_cov_src_note})
+is how much scannable source we actually read; **control coverage** ({m['coverage_pct']}% of critical sinks
+with a declared guard) is only accurate once YOUR control functions are declared in the guard config.
+
 ---
-*Honest-scope: "coverage / gap-finder", not a containment proof. Blind spots (dynamic dispatch, runtime
-config, cross-process store, non-Python) are not covered and are documented in the threat model. Coverage
-is only accurate once YOUR control functions are declared in the guard config.*
+*Honest-scope: "coverage / gap-finder", not a containment proof.*
 """
     return out
 
@@ -437,6 +599,9 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         _ir = IR.build_report(Path(root) if root else Path("."), scan, validated)
     except Exception:
         _ir = {}
+    c = _reconciled_counts(m, _ir)
+    repo_kind = c["kind"]
+    is_app = repo_kind == "app"
     reachable = _ir.get("non_gated_vulnerable", m["no_gate"])
     install_liab = _ir.get("install_liability_rce", 0)
     amber_actions = _ir.get("reachable_amber_actions", 0)
@@ -477,7 +642,7 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     if proven > 0 or reachable > 0:
         n = reachable if reachable else proven
         b_sub = (f"<b>{n} dangerous {_pl(n, 'action', 'actions')}</b> an attacker can reach in this code "
-                 f"right now, with nothing in the way. {_pl(n, 'Fix this first.', 'Fix these first.')}")
+                 f"right now, no control we can credit. {_pl(n, 'Fix this first.', 'Fix these first.')}")
         if proven:
             b_sub += (f" <b>{proven}</b> {_pl(proven, 'is', 'are')} proven-live — we demonstrated a real "
                       f"attack path.")
@@ -592,7 +757,7 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     def esc(x):
         return _html.escape(str(x))
 
-    def rows(items, limit=30):
+    def rows(items, limit=250):   # roll rows up (was capped at 30) — only pathological inventories overflow
         out = []
         for s in items[:limit]:
             cap = _CAP_LABEL.get(s.capability, s.capability)
@@ -617,7 +782,7 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     _fix_held = [it for it in _fixrows if it["band"] == "held"]
     _fix_shown = [it for it in _fixrows if it["band"] != "held"]
 
-    def fixplan_rows(items, badge, empty, limit=30):
+    def fixplan_rows(items, badge, empty, limit=250):   # roll rows up (was capped at 30)
         out = []
         for it in items[:limit]:
             # EVERY fix row is TWO steps: Step 1 (the control — free directional advice) and Step 2 (the
@@ -699,11 +864,61 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         f"{_pl(len(_fix_held), 'It remains', 'They remain')} in <code>hermes_patch_plan.json</code>.</div>")
     # COMPLETENESS line — the buyer sees the whole plan reconcile against the machine-readable artefact.
     _n_shown, _n_held = len(_fix_shown), len(_fix_held)
+    # NB: this per-site table is rolled up per call site, so its row count is NOT the JSON inventory total.
+    # The ONE machine-inventory reconcile claim is made once, above, by fixcards_reconcile_html (_inv_n =
+    # len(patch_plan.build(prod)) — the real row count written to hermes_patch_plan.json). Do not re-assert a
+    # second, different "(N total)" here or the two claims contradict.
     fixplan_count_html = (
         f"<div class=fpcount><b>{_n_shown} fix-plan {_pl(_n_shown, 'item', 'items')}</b> below"
         + (f", <b>{_n_held}</b> held" if _n_held else "")
-        + f" — every mapped surface that needs a control appears here, reconciled with "
-        f"<code>hermes_patch_plan.json</code> ({_n_shown + _n_held} total).</div>")
+        + " — every mapped surface that needs a control appears here, rolled up per call site "
+        "(the full machine inventory is <code>hermes_patch_plan.json</code>, reconciled above).</div>")
+    # DE-NOISE — collapse the FULL machine inventory (hermes_patch_plan.json) into ONE fix-card per control
+    # point + a leverage-ranked "FIX THESE FIRST — top 5". The card view is what a human reads; the per-site
+    # tables below stay for the auditor. Grouping only — every JSON row is preserved.
+    _CLASS_BADGE = {
+        "gate": "<span class='badge fn'>fix now — no control</span>",
+        "review": "<span class='badge rw'>review — certify &amp; gate</span>",
+        "held": "<span class='badge hv'>held — verify first</span>",
+        "informational": "<span class='badge in'>informational — no gate needed</span>"}
+    _groups, _top5, _inv_n = _fix_cards(scan)
+    fixcards_reconcile_html = (
+        f"<div class=fpcount><b>{len(_groups)} fix-{_pl(len(_groups), 'card', 'cards')}</b> below de-noise "
+        f"the <b>{_inv_n}-row</b> machine inventory in <code>hermes_patch_plan.json</code> — grouped by the "
+        f"single control point each shares. Every row is preserved in the JSON (the Repairer feed); nothing "
+        f"is dropped.</div>")
+    if _top5:
+        _t5 = "".join(
+            f"<li><b>{esc(g['control_point'])}</b> — one fix closes <b>{g['count']} "
+            f"{_pl(g['count'], 'site', 'sites')}</b> "
+            f"<span class=c>({esc(g['capability'])}, severity {g['severity']}; leverage {g['leverage']})</span></li>"
+            for g in _top5)
+        fixcards_top5_html = (
+            "<div class=top5><div class=k>▸ FIX THESE FIRST — top 5 "
+            "<span class=c>ranked by leverage = sites-closed × severity</span></div>"
+            f"<ol>{_t5}</ol></div>")
+    else:
+        fixcards_top5_html = ""
+
+    def _card_html(g):
+        _locs = g["locations"][:3]
+        _more = g["count"] - len(_locs)
+        _tail = (f" <span class=more>…and {_more:,} more of this group in "
+                 f"<code>hermes_patch_plan.json</code></span>" if _more > 0 else "")
+        _covers = ", ".join(f"<span class=mono>{esc(l)}</span>" for l in _locs)
+        _proof = ("" if g["fix_class"] == "informational" else
+                  f"<div class=fstep><span class=fsn>Step 2 — prove it blocks</span>{esc(g['suggested_test'])}</div>")
+        return (
+            f"<div class=fixcard>"
+            f"<div class=fchead>{_CLASS_BADGE.get(g['fix_class'], '')}"
+            f"<b>{esc(g['control_point'])}</b>"
+            f"<span class=sites>one fix closes <b>{g['count']} {_pl(g['count'], 'site', 'sites')}</b></span></div>"
+            f"<div class=fstep><span class=fsn>Step 1 — the one control</span>{esc(g['control'])}</div>"
+            f"{_proof}"
+            f"<div class=fccovers>Covers: {_covers}{_tail}</div>"
+            f"</div>")
+    fixcards_html = "".join(_card_html(g) for g in _groups) or "<div class=more>(none — nothing to plan)</div>"
+
     # QUANTIFY honestly — the real work each sink demands, and exactly what the Repairer delivers (present
     # tense; the deterministic tier is real today, the AI tier is early access — never overclaimed).
     fix_quantify_html = ("" if not _n_shown else (
@@ -799,8 +1014,26 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
         f"one.</div>{_ai_body}")
 
     band_class = {"Low": "lo", "Med": "md", "High": "hi"}.get(band, "lo")
+    # CONTEXT-AWARE install-liability stat + KILL THE INVERTED "0 · Low" GREEN PILL.
+    #   * APP  — nobody installs an app, so install-liability is N/A. NEVER a green "0 · Low" badge (that
+    #            reads as a clean bill of health). The tile shows "N/A" with a muted app note.
+    #   * LIBRARY with >0 inherited — the inherited-rating pill rides the count (Low/Med/High).
+    #   * LIBRARY with 0 inherited — the count 0 with NO pill (a rating on an empty set is meaningless), and
+    #            crucially NO green "Low" badge on a harmless zero.
+    if is_app:
+        il_stat_n = "N/A"
+        il_pill = '<span class="pill na">app</span>'
+        il_stat_h = "nobody installs an app — its risk is what is reachable now, not what it inherits"
+    else:
+        il_stat_n = f"{install_liab:,}"
+        il_pill = f'<span class="pill {band_class}">{band}</span>' if install_liab else ""
+        il_stat_h = ("dangerous capability that's harmless here but live once installed — inert here, live "
+                     "on install" if install_liab
+                     else "no RCE-class capability inherited on install")
     fonts = _font_face_css()
     scan_date = _dt_date.today().isoformat()
+    exec_headline = _exec_headline(c)
+    exec_verdict = _exec_verdict(c)
 
     return f"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -870,6 +1103,18 @@ border-radius:999px;margin-left:10px;vertical-align:middle;letter-spacing:.05em;
 .pill.lo{{color:var(--sky);border:1px solid rgba(82,189,255,.4);background:rgba(82,189,255,.08)}}
 .pill.md{{color:var(--blaze);border:1px solid rgba(250,125,9,.45);background:rgba(250,125,9,.08)}}
 .pill.hi{{color:var(--heat);border:1px solid rgba(255,67,1,.45);background:rgba(255,67,1,.08)}}
+/* app install-liability pill — muted/neutral, NEVER the green "Low" that reads as a clean bill of health. */
+.pill.na{{color:var(--muted);border:1px solid var(--line);background:rgba(234,217,192,.05)}}
+/* ---- executive summary block (section 2): one reconciled headline + one verdict, side by side ---- */
+.execsum{{background:var(--panel2);border:1px solid var(--line);border-left:4px solid var(--blaze);
+border-radius:0 16px 16px 0;padding:20px 26px;margin:24px 0 0}}
+.execsum .k{{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+color:var(--blaze);margin-bottom:10px}}
+.execsum .k .c{{color:var(--muted);text-transform:none;letter-spacing:.02em}}
+.execsum .exline{{font-family:var(--serif);font-size:clamp(1.15rem,2.4vw,1.5rem);line-height:1.35;
+color:var(--cream);font-weight:500}}
+.execsum .exverdict{{color:var(--muted);font-size:15px;margin-top:12px;line-height:1.6}}
+.execsum .exverdict b{{color:var(--cream)}}
 .verdict{{background:var(--panel2);border:1px solid var(--line);border-left:4px solid var(--blaze);
 border-radius:16px;padding:26px 30px;margin:26px 0 0}}
 .verdict .k{{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
@@ -890,16 +1135,24 @@ color:var(--apricot);margin:28px 0 6px;font-weight:600}}
 h3 .c{{color:var(--faint);font-weight:400;letter-spacing:.02em;text-transform:none;margin-left:8px}}
 .tier{{color:var(--muted);font-size:14px;margin:0 0 16px;max-width:78ch;line-height:1.65}}
 .tier b{{color:var(--cream);font-weight:600}}
+/* TRUNCATION/LAYOUT — every table is its own horizontal-scroll container (display:block + overflow-x:auto,
+   the standard responsive trick: internal rows still form a table via anonymous table boxes) so a long mono
+   path can never force the whole page to scroll sideways. */
+.scroll{{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}}
 table{{border-collapse:collapse;width:100%;font-family:var(--mono);font-size:12.5px;
-background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}}
+background:var(--panel);border:1px solid var(--line);border-radius:12px;
+display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}}
 td{{padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}}
 tr:last-child td{{border-bottom:none}}
-.mono{{color:var(--cream)}}.ln{{color:var(--blaze)}}.cap{{color:var(--apricot);white-space:nowrap}}
-.sym{{color:var(--muted)}}.more{{color:var(--muted);font-style:italic}}
+/* mono paths wrap instead of forcing width — word-break/overflow-wrap:anywhere. */
+.mono{{color:var(--cream);overflow-wrap:anywhere;word-break:break-word}}
+.ln{{color:var(--blaze)}}.cap{{color:var(--apricot)}}
+.sym{{color:var(--muted);overflow-wrap:anywhere;word-break:break-word}}.more{{color:var(--muted);font-style:italic}}
 .hd{{color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:.09em;font-weight:600;
 background:var(--panel2)}}
-.tier2{{white-space:nowrap}}.ctrl{{color:var(--cream);line-height:1.5;font-family:var(--sans)}}
-.plan{{color:var(--apricot);white-space:nowrap;font-weight:600}}
+/* status/tier no longer nowrap — they may wrap on a narrow viewport rather than blow out the row. */
+.tier2{{}}.ctrl{{color:var(--cream);line-height:1.5;font-family:var(--sans)}}
+.plan{{color:var(--apricot);font-weight:600}}
 .badge{{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.05em;
 text-transform:uppercase;padding:3px 9px;border-radius:999px;white-space:nowrap}}
 .badge.ff{{color:var(--heat);border:1px solid rgba(255,67,1,.5);background:rgba(255,67,1,.1)}}
@@ -907,6 +1160,10 @@ text-transform:uppercase;padding:3px 9px;border-radius:999px;white-space:nowrap}
 .badge.wt{{color:var(--blaze);border:1px solid rgba(250,125,9,.5);background:rgba(250,125,9,.1)}}
 .badge.ru{{color:var(--heat);border:1px solid rgba(255,67,1,.5);background:rgba(255,67,1,.1)}}
 .badge.rw{{color:var(--apricot);border:1px solid rgba(255,201,143,.5);background:rgba(255,201,143,.09)}}
+/* ---- DE-NOISE fix-card class badges (distinct from the per-site table badges above) ---- */
+.badge.fn{{color:var(--heat);border:1px solid rgba(255,67,1,.5);background:rgba(255,67,1,.1)}}
+.badge.hv{{color:var(--muted);border:1px solid rgba(160,160,160,.4);background:rgba(160,160,160,.08)}}
+.badge.in{{color:var(--sky);border:1px solid rgba(82,189,255,.45);background:rgba(82,189,255,.08)}}
 /* ---- fix-row two-step control cell (Step 1 = control, Step 2 = the proof-test) ---- */
 .fstep{{margin:0 0 8px}}.fstep:last-child{{margin-bottom:0}}
 .fsn{{display:block;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.08em;
@@ -925,6 +1182,24 @@ border-radius:0 12px 12px 0;padding:14px 20px;margin:0 0 18px;color:var(--cream)
 line-height:1.55;font-weight:500}}
 .fpcount{{color:var(--muted);font-size:13px;margin:0 0 14px}}.fpcount b{{color:var(--cream)}}
 .fpcount code,.held code{{font-family:var(--mono);color:var(--apricot)}}
+/* ---- DE-NOISE: fix cards (one per control point) + top-5 leverage list ---- */
+.top5{{background:rgba(250,125,9,.08);border:1px solid rgba(250,125,9,.34);border-left:4px solid var(--blaze);
+border-radius:0 12px 12px 0;padding:14px 22px;margin:0 0 20px}}
+.top5 .k{{font-weight:700;color:var(--cream);font-size:13px;letter-spacing:.04em;margin:0 0 8px}}
+.top5 .k .c{{color:var(--blaze);font-weight:600;letter-spacing:.02em}}
+.top5 ol{{margin:0;padding-left:22px}}.top5 li{{color:var(--cream);font-size:14px;line-height:1.7}}
+.top5 .c{{color:var(--muted)}}
+.fixcards{{display:flex;flex-direction:column;gap:12px;margin:0 0 20px}}
+.fixcard{{border:1px solid rgba(250,125,9,.22);border-radius:6px 14px 14px 6px;
+background:rgba(250,125,9,.03);padding:12px 18px}}
+.fchead{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 8px}}
+.fchead b{{color:var(--cream);font-size:14.5px}}
+.fchead .sites{{margin-left:auto;color:var(--muted);font-size:12.5px}}.fchead .sites b{{color:var(--apricot)}}
+.fccovers{{color:var(--muted);font-size:12px;margin:8px 0 0}}
+.fccovers .mono{{font-family:var(--mono);color:var(--apricot)}}
+.fccovers .more{{color:var(--muted)}}.fccovers code{{font-family:var(--mono);color:var(--apricot)}}
+details.fulldetail{{margin:8px 0 0}}details.fulldetail>summary{{cursor:pointer;color:var(--muted);
+font-size:13px;padding:6px 0;user-select:none}}details.fulldetail>summary:hover{{color:var(--cream)}}
 .held{{color:var(--muted);font-size:13.5px;background:var(--panel);border:1px solid var(--line);
 border-radius:12px;padding:14px 18px;margin:18px 0 0;line-height:1.6}}.held b{{color:var(--cream)}}
 /* ---- moved-up Repairer value-anchor (beside the first reachable-now finding) ---- */
@@ -957,19 +1232,56 @@ border-left:4px solid var(--blaze);padding:18px 22px;border-radius:0 12px 12px 0
 .foot{{color:var(--faint);font-size:12px;margin-top:34px;border-top:1px solid var(--line);
 padding-top:16px;line-height:1.6}}
 .foot code,.meta code{{font-family:var(--mono);color:var(--apricot)}}
+/* ---- NARROW / MOBILE breakpoint ---- */
+@media (max-width:640px){{
+  .wrap{{padding:24px 14px 56px}}
+  .banner{{flex-direction:column;gap:12px;padding:22px 18px}}
+  .banner .icon{{font-size:34px}}
+  .stats{{grid-template-columns:1fr 1fr}}
+  .plain{{grid-template-columns:1fr}}
+  .bar{{grid-template-columns:110px 1fr 42px;gap:8px;font-size:11px}}
+  table{{font-size:11.5px}}
+  h1{{font-size:1.5rem}}
+}}
+/* ---- PRINT / PDF — ink-on-white for CISO archiving; drop the dark sunset skin, keep the structure ---- */
+@media print{{
+  @page{{margin:14mm}}
+  html,body{{background:#fff !important;color:#111 !important}}
+  .wrap{{max-width:none;padding:0}}
+  *{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+  .banner,.execsum,.verdict,.stat,.pw,.fixwrap,.top5,.fixcard,.anchor,.cta,.note,.proofcall,.held,table{{
+    background:#fff !important;border:1px solid #bbb !important;box-shadow:none !important}}
+  .banner .head,.banner .icon,h1,h2,h3,.brand,.mono,.stat .n,.execsum .exline,.verdict .v{{color:#111 !important}}
+  .banner.red{{border-left:5px solid #b00 !important}}
+  .banner.amber{{border-left:5px solid #b45f00 !important}}
+  .banner.blue{{border-left:5px solid #04408a !important}}
+  .badge,.pill{{border:1px solid #666 !important;color:#111 !important;background:#f0f0f0 !important}}
+  .tagline,.tier,.h,.meta,.foot,.execsum .exverdict{{color:#333 !important}}
+  a[href]::after{{content:" (" attr(href) ")";font-size:10px;color:#555}}
+  details{{display:block}}
+  details>summary{{display:none}}
+}}
 </style></head><body><div class=wrap>
+<!-- SECTION 1 — COVER / IDENTITY -->
 <div class=mast>
   <div class=brand>HERMES <span class=sh>SHIELD</span></div>
-  <div class=sub>excessive-agency scan · OWASP LLM06 · scanned {scan_date} · scanner v{esc(_ver)}</div>
+  <div class=sub>excessive-agency scan · OWASP LLM06 · scanned {scan_date} · scanner v{esc(_ver)} · {esc(repo_kind)} repo</div>
 </div>
 
+<!-- SECTION 2 — EXECUTIVE SUMMARY (one reconciled headline + one verdict that agree) -->
 <div class="banner {b_cls}">
   <div class=icon>{b_icon}</div>
   <div>
-    <div class=k>scan verdict · {esc(repo_name)}</div>
+    <div class=k>scan verdict · {esc(repo_name)} · {esc(repo_kind)}</div>
     <div class=head>{b_head}</div>
     <div class=bsub>{b_sub}</div>
   </div>
+</div>
+
+<div class=execsum>
+  <div class=k>▸ Executive summary <span class=c>— one reconciled headline; every number below matches it</span></div>
+  <div class=exline>{esc(exec_headline)}</div>
+  <div class=exverdict><b>OWASP LLM06 verdict:</b> {esc(exec_verdict)}</div>
 </div>
 
 <div class=plain>
@@ -978,6 +1290,7 @@ padding-top:16px;line-height:1.6}}
   <div class=pw><span class=pk>What to do</span>{pw_do}</div>
 </div>
 
+<!-- SECTION 3 — SEVERITY-FIRST SCOREBOARD -->
 <h1>{total_surfaces:,} {_pl(total_surfaces, 'place', 'places')} this code can act &mdash; mapped.</h1>
 <div class=tagline>Statically, locally, rated by proven reachability &mdash; your code never leaves this machine.</div>
 <div class=meta><b>Repository:</b> <code>{esc(repo_name)}</code> &nbsp;·&nbsp; <b>{files:,}</b> {_pl(files, 'file', 'files')} scanned
@@ -986,8 +1299,8 @@ executed · the deterministic core makes no network calls (optional --ai/--deps 
 
 <div class=stats>
   <div class="stat surf"><div class=n>{total_surfaces:,}</div><div class=l>Action-surfaces</div><div class=h>every point the agent can act — the map</div></div>
-  <div class="stat inst"><div class=n>{install_liab:,}<span class="pill {band_class}">{band}</span></div><div class=l>Install-liability</div><div class=h>dangerous capability that's harmless here but live once installed — inert here, live on install</div></div>
-  <div class="stat reach"><div class=n>{reachable:,}</div><div class=l>Reachable in-repo</div><div class=h>live now — from this repo's own entrypoints</div></div>
+  <div class="stat inst"><div class=n>{il_stat_n}{il_pill}</div><div class=l>Install-liability</div><div class=h>{il_stat_h}</div></div>
+  <div class="stat reach"><div class=n>{reachable:,}</div><div class=l>Reachable now</div><div class=h>already reachable by untrusted input, unguarded — from this repo's own entrypoints</div></div>
   <div class="stat cov"><div class=n>{files:,}</div><div class=l>Files scanned</div><div class=h>{cov_note}</div></div>
 </div>
 
@@ -999,17 +1312,20 @@ executed · the deterministic core makes no network calls (optional --ai/--deps 
   beyond those. A clean verdict means <b>not demonstrated exploitable</b> — it is never read as "secure".</small>
 </div>
 
-<h2>▸ Reachable in-repo <span class=c>— live now, from this repo's own entrypoints (fix first)</span></h2>
+<!-- SECTION 4 — ALREADY REACHABLE BY UNTRUSTED INPUT (unguarded) — start here -->
+<h2>▸ Already reachable by untrusted input <span class=c>— Reachable in-repo: unguarded, live now, from this repo's own entrypoints (fix first)</span></h2>
 <div class=tier>An untrusted input can reach these dangerous actions with no control in the way, today.</div>
-<table>{rows(live)}</table>
+<div class=scroll><table>{rows(live)}</table></div>
 {repairer_anchor_html}
 
 {amber_band_html}
 
 {fixed_dest_band_html}
 
+<!-- SECTION 5 — NEEDS A HUMAN TRACE (not proven safe) -->
 {reach_unknown_html}
 
+<!-- SECTION 6 — FIX PLAN (de-noised cards + top 5; full per-site rows rolled up) -->
 <section class=fixwrap>
 <h2 class=fixh2>▸ Fix plan <span class=c>— generated, not applied</span></h2>
 <div class=tier>Fix-at-source controls for the findings that need one — <b>every row is two steps</b>: Step 1
@@ -1020,6 +1336,11 @@ the control (the free directional advice), Step 2 the adversarial proof-test tha
 the control as a reviewed diff, then <b>re-runs the real attack and proves the sink flips from exploitable
 to blocked (RED→PROTECTED), re-verified by the same scanner</b> — human-gated, never auto-fix. The
 <b>AI-assist tier is in early access</b>.</div>
+{fixcards_reconcile_html}
+{fixcards_top5_html}
+<h3>Fix cards <span class=c>— one card per control point</span></h3>
+<div class=fixcards>{fixcards_html}</div>
+<details class=fulldetail><summary>Full per-site fix rows (every call site)</summary>
 {fixplan_count_html}
 <h3>Fix first — reachable now <span class=c>— {len(_fix_reach)} {_pl(len(_fix_reach), 'item', 'items')} · classified by the same reachable-unguarded rule as the “Reachable in-repo” count above</span></h3>
 <table>{_fixhead}{fixplan_reach_html}</table>
@@ -1028,6 +1349,7 @@ to blocked (RED→PROTECTED), re-verified by the same scanner</b> — human-gate
 {fixplan_review_block}
 {fixplan_wiring_block}
 {fixplan_held_block}
+</details>
 </section>
 
 <div class=cta>
@@ -1041,14 +1363,9 @@ to blocked (RED→PROTECTED), re-verified by the same scanner</b> — human-gate
   <a class=link href="https://hermesshield.ai/repairer">Join the early-access list → hermesshield.ai/repairer</a>
 </div>
 
-<h2>▸ Install-liability <span class=c>— RCE-class capability you inherit on install (proven inert here)</span></h2>
-<div class=tier>RCE-class (an attacker running their own code on your machine) capabilities that are
-<b>proven inert here, live on install</b>: not reachable from this repo's own entrypoints today <b>and</b>
-sitting behind no untrusted ingress or unresolved dispatch, but a live attack surface the moment they're
-wired into an agent that reads untrusted input. Capped at Med — not a vulnerability in this repo. The fix
-is wiring-time: gate each capability before you wire untrusted input to it on install — this is not a
-fix-now list. <b>Sinks we could not prove inert appear under “Reachability unknown” above, not here.</b></div>
-<table>{rows(il)}</table>
+<h2>▸ Install-liability <span class=c>— {'N/A for an app — nobody installs an app' if is_app else 'RCE-class capability you inherit on install (proven inert here)'}</span></h2>
+<div class=tier>{"<b>This repo is an app, not a library.</b> Nobody installs an app and wires their own untrusted input to it, so install-liability does not apply here — the honest risk is what is <b>reachable now</b> (section 4 above), not what a downloader would inherit. Listed for completeness only." if is_app else "RCE-class (an attacker running their own code on your machine) capabilities that are <b>proven inert here, live on install</b>: not reachable from this repo's own entrypoints today <b>and</b> sitting behind no untrusted ingress or unresolved dispatch, but a live attack surface the moment they're wired into an agent that reads untrusted input. Capped at Med — not a vulnerability in this repo. The fix is wiring-time: gate each capability before you wire untrusted input to it on install — this is not a fix-now list. <b>Sinks we could not prove inert appear under “Reachability unknown” above, not here.</b>"}</div>
+<div class=scroll><table>{rows(il)}</table></div>
 
 {review_html}
 
@@ -1057,6 +1374,8 @@ fix-now list. <b>Sinks we could not prove inert appear under “Reachability unk
 <h2>▸ Action-surface map <span class=c>— by capability</span></h2>
 <div class=bars>{bars}</div>
 
+<!-- SECTION 7 — METHODOLOGY / SCOPE + HONEST BLIND SPOTS -->
+<h2>▸ Methodology, scope &amp; honest blind spots</h2>
 <div class=note><b>How to read this.</b> Static excessive-agency analysis for OWASP LLM06: it assumes
 prompt-injection succeeds and maps what a hijacked agent could then DO — the target is read in place, never
 executed. Severity is <b>reachability-rated</b>: <b>reachable-in-repo</b> is live now; <b>install-liability</b>

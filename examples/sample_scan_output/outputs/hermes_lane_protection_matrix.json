@@ -3,7 +3,7 @@
     [
       "app",
       "code_exec",
-      "-",
+      "yes",
       "yes",
       "-",
       "-",
@@ -15,12 +15,12 @@
       "-",
       "-",
       "untested_gap",
-      "BLOCK_LIVE_PROMOTION"
+      "UNGUARDED_CRITICAL_LIVE_SINK"
     ],
     [
       "app",
       "dashboard_mutation",
-      "-",
+      "yes",
       "unknown",
       "-",
       "-",
@@ -37,7 +37,7 @@
     [
       "app",
       "external_write",
-      "-",
+      "yes",
       "yes",
       "-",
       "-",

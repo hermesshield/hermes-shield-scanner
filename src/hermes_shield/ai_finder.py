@@ -21,6 +21,7 @@ from typing import List, Optional
 
 from . import repo_map as RM
 from . import ai_verify
+from . import ai_stream
 from .ai_assist import AIAgentError
 
 _SYSTEM = '''You are a security auditor finding DANGEROUS ACTION-SURFACES in an AI-agent codebase — calls a
@@ -137,29 +138,50 @@ def _finder_agent(model: str, timeout: int):
         exe = shutil.which("claude")
         if not exe:
             raise AIAgentError("claude CLI not found on PATH — install it, or pass a custom finder agent")
-        cmd = [exe, "-p", prompt, "--model", model, "--allowedTools", "Read,Grep,Glob"]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=timeout, cwd=cwd)
-        except subprocess.TimeoutExpired:
-            raise AIAgentError(f"claude finder CLI timed out after {timeout}s")
-        except Exception as e:
-            raise AIAgentError(f"claude finder CLI failed to launch: {e.__class__.__name__}: {e}")
-        out = proc.stdout or ""
+        if ai_stream.feed_enabled():
+            # TTY ONLY: divert to the DISPLAY-ONLY streaming layer — a live "→ Read/Grep …" feed + elapsed
+            # clock on STDERR (via `claude --output-format stream-json --verbose`, else a spinner heartbeat)
+            # so the finder never looks hung. It returns the SAME (stdout, returncode, stderr) triple
+            # subprocess.run does — the accumulated final `result` text is byte-identical to `claude -p` —
+            # so the fail-loud guards below are unchanged. stdout / the JSON artefacts are never touched.
+            try:
+                out, returncode, stderr = ai_stream.run_claude(
+                    exe, prompt, model=model, cwd=cwd, timeout=timeout,
+                    allowed_tools="Read,Grep,Glob",
+                    banner=f"▶ AI finder · {model or 'default'} · reading across the repo…",
+                    hb_label=f"AI finder · {model or 'default'}", prefer_stream=True)
+            except subprocess.TimeoutExpired:
+                raise AIAgentError(f"claude finder CLI timed out after {timeout}s")
+            except AIAgentError:
+                raise
+            except Exception as e:
+                raise AIAgentError(f"claude finder CLI failed to launch: {e.__class__.__name__}: {e}")
+        else:
+            # NON-TTY / piped / CI: the ORIGINAL blocking call, byte-identical to the pre-change path (this
+            # is the code path tests and CI exercise). No progress is emitted anywhere.
+            cmd = [exe, "-p", prompt, "--model", model, "--allowedTools", "Read,Grep,Glob"]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                      errors="replace", timeout=timeout, cwd=cwd)
+            except subprocess.TimeoutExpired:
+                raise AIAgentError(f"claude finder CLI timed out after {timeout}s")
+            except Exception as e:
+                raise AIAgentError(f"claude finder CLI failed to launch: {e.__class__.__name__}: {e}")
+            out, returncode, stderr = (proc.stdout or ""), proc.returncode, (proc.stderr or "")
         # FIX 2 (+ hardening): a nonzero exit is a failure UNLESS stdout IS a top-level JSON array. Previously
         # only an EMPTY stdout raised, so a nonzero exit carrying non-empty, non-JSON, non-refusal prose fell
         # through _parse -> [] -> status "ok" (a silent zero). Using the *embedded*-span check still let a JSON
         # error payload ({"...":[]}) at exit!=0 masquerade as an empty result, so the guard now requires a
         # top-level array: an overload/rate-limit error object fails loud; a genuine findings array still returns.
-        if proc.returncode != 0 and _is_toplevel_json_array(out) is None:
-            tail = (proc.stderr or out or "").strip().splitlines()
+        if returncode != 0 and _is_toplevel_json_array(out) is None:
+            tail = (stderr or out or "").strip().splitlines()
             detail = tail[-1][:160] if tail else "no output"
-            raise AIAgentError(f"claude finder CLI exited {proc.returncode}: {detail}")
+            raise AIAgentError(f"claude finder CLI exited {returncode}: {detail}")
         if _is_refusal(out):
             reason = out.strip().splitlines()[0][:160] if out.strip() else "no output"
             raise AIAgentError(
                 f"claude finder backend '{model}' refused the security-auditor prompt "
-                f"(content-policy refusal, exit {proc.returncode}): {reason}")
+                f"(content-policy refusal, exit {returncode}): {reason}")
         return out
     return run
 

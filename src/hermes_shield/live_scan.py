@@ -228,7 +228,8 @@ def _run_with_hud(run_fn, stream, colour: bool):
                 pass
             except StopIteration:
                 break
-            hud.frame(_hud_lines(st, next(spin), colour))
+            if not st.get("ai_active"):   # while AI owns STDERR, stop redrawing the sticky STDOUT HUD
+                hud.frame(_hud_lines(st, next(spin), colour))
             time.sleep(0.08)
     except KeyboardInterrupt:
         interrupted = True
@@ -245,6 +246,20 @@ def _consume(ev, st, hud, logged, finds):
     """Fold one real progress event into the HUD state, emitting permanent upward-log lines for the
     interesting ones (files that found surfaces; RCE-class finds; confirmed reachable-unguarded sinks)."""
     ph = ev.get("phase")
+    if ph == "ai":
+        # the AI phase (per-file tier + whole-repo finder) shells out to `claude` and renders its OWN live
+        # feed on STDERR (ai_stream). Tear the sticky HUD down so the two never fight the terminal, and mark
+        # the HUD paused so _run_with_hud stops framing until the AI phase completes.
+        if ev.get("start"):
+            st["ai_active"] = True
+            hud.log(f"  {_c(_O, hud.col)}▸{_r(hud.col)} {_c(_B, hud.col)}AI phase{_r(hud.col)}"
+                    f"  {_c(_DIM, hud.col)}· live feed on stderr{_r(hud.col)}")
+            hud.leave()
+        elif ev.get("done"):
+            st["ai_active"] = False
+            hud.log(f"  {_c(_GRN, hud.col)}✓{_r(hud.col)} {_c(_B, hud.col)}AI phase complete{_r(hud.col)}"
+                    f"  {_c(_DIM, hud.col)}· advisory ai_suspected surfaces{_r(hud.col)}")
+        return logged, finds
     if ev.get("start"):
         st["phase"] = ph
         st["step"] = ""

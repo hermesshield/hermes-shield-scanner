@@ -102,6 +102,16 @@ def _cap_ai_source(text: str, limit: int = _MAX_AI_SOURCE_BYTES) -> str:
     return head + "\n# [TRUNCATED: file exceeds the AI-tier size cap; remainder not submitted]"
 
 
+def _feed_enabled() -> bool:
+    """True iff a STDERR live feed may be drawn (interactive TTY, no opt-out). Lazy import keeps ai_stream
+    optional and off the byte-identical non-TTY path. A failure to import defaults to False (blocking)."""
+    try:
+        from . import ai_stream
+        return ai_stream.feed_enabled()
+    except Exception:
+        return False
+
+
 def claude_agent(model: str | None = None):
     """Built-in agent backend using the local claude CLI. Returns a propose(prompt, timeout)->raw callable.
 
@@ -112,19 +122,40 @@ def claude_agent(model: str | None = None):
         exe = shutil.which("claude")
         if not exe:
             raise AIAgentError("claude CLI not found on PATH — install it, or pass a custom agent")
-        cmd = [exe, "-p", prompt] + (["--model", model] if model else [])
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=timeout)
-        except subprocess.TimeoutExpired:
-            raise AIAgentError(f"claude CLI timed out after {timeout}s")
-        except Exception as e:
-            raise AIAgentError(f"claude CLI failed to launch: {e.__class__.__name__}: {e}")
-        if proc.returncode != 0 and not (proc.stdout or "").strip():
-            tail = (proc.stderr or "").strip().splitlines()
+        if _feed_enabled():
+            # TTY ONLY: DISPLAY-ONLY heartbeat (ai_stream.run_claude, prefer_stream=False). The per-file tier
+            # can fire up to `budget` times, so it shows a compact self-clearing spinner + elapsed clock on
+            # STDERR rather than a per-file event feed — enough that a blocking `claude -p` call never looks
+            # hung. It returns the SAME (stdout, returncode, stderr) triple subprocess.run does, so the guard
+            # below is unchanged.
+            from . import ai_stream
+            try:
+                out, returncode, stderr = ai_stream.run_claude(
+                    exe, prompt, model=model, timeout=timeout,
+                    hb_label="AI tier · analysing source", prefer_stream=False)
+            except subprocess.TimeoutExpired:
+                raise AIAgentError(f"claude CLI timed out after {timeout}s")
+            except AIAgentError:
+                raise
+            except Exception as e:
+                raise AIAgentError(f"claude CLI failed to launch: {e.__class__.__name__}: {e}")
+        else:
+            # NON-TTY / piped / CI: the ORIGINAL blocking call, byte-identical to the pre-change path (this is
+            # the code path tests and CI exercise).
+            cmd = [exe, "-p", prompt] + (["--model", model] if model else [])
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True,
+                                      encoding="utf-8", errors="replace", timeout=timeout)
+            except subprocess.TimeoutExpired:
+                raise AIAgentError(f"claude CLI timed out after {timeout}s")
+            except Exception as e:
+                raise AIAgentError(f"claude CLI failed to launch: {e.__class__.__name__}: {e}")
+            out, returncode, stderr = (proc.stdout or ""), proc.returncode, (proc.stderr or "")
+        if returncode != 0 and not (out or "").strip():
+            tail = (stderr or "").strip().splitlines()
             detail = tail[-1][:160] if tail else "no output"
-            raise AIAgentError(f"claude CLI exited {proc.returncode}: {detail}")
-        return proc.stdout or ""
+            raise AIAgentError(f"claude CLI exited {returncode}: {detail}")
+        return out
     return _propose
 
 

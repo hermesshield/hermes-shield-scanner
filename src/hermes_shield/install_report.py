@@ -216,6 +216,28 @@ def _severity_sort_key(s):
     return (-_SEVERITY.get(cap, 3), getattr(s, "file_path", ""), ln)
 
 
+def _stable_identity(s):
+    """The stable identity of a physical sink for report-truth de-duplication: (file, sink line, capability).
+    Two surfaces sharing this tuple are the SAME sink (reached from two callers / seen by two passes), so they
+    are ONE inherited risk. Mirrors the (file, symbol, capability, sink)-style stable_id used for drift, but
+    keyed on the exact call line the row prints so it can never collapse two genuinely-distinct sinks."""
+    ln = getattr(s, "sink_line", 0) or getattr(s, "line_start", 0)
+    return (getattr(s, "file_path", ""), ln, getattr(s, "capability", ""))
+
+
+def _dedup_by_identity(surfaces):
+    """Order-preserving de-dup by _stable_identity — keep the FIRST occurrence (the list is pre-sorted by
+    salience, so the first is the highest-ranked representative). Returns a new list; input is not mutated."""
+    seen, out = set(), []
+    for s in surfaces:
+        k = _stable_identity(s)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(s)
+    return out
+
+
 def risk_rating(capability, reachable, gated, poc, language="python", external_write_egress=False):
     """Severity(1-5) x Likelihood(1-5) -> index -> Low/Med/High, with honesty guardrails."""
     sev = 4 if (capability == "external_write" and external_write_egress) else _SEVERITY.get(capability, 3)
@@ -310,6 +332,66 @@ def _repo_has_unresolved_dispatch(surfaces) -> bool:
         if isinstance(ga, dict) and ga.get("resolution_limits"):
             return True
     return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════════════
+# CONTEXT-AWARE repo classification (APP vs LIBRARY / MCP-server). This is the CORE honesty fix for the
+# customer report headline: the same finding means different things in an app vs a library.
+#
+#   * A LIBRARY / MCP-server is INSTALLED by other people and wired to their untrusted input. Its RCE-class
+#     surfaces are the INSTALL-LIABILITY you inherit — that is the honest headline.
+#   * An APP runs its OWN entrypoints; NOBODY installs it. So install-liability is meaningless ("N/A — nobody
+#     installs an app"), and the honest headline is what is REACHABLE-NOW from its own routes/webhooks.
+#
+# Signals (deterministic, read-only):
+#   LIBRARY  — a publish target: pyproject [project.scripts] / [project.entry-points] / console_scripts,
+#              setup.py / setup.cfg with entry_points, OR an MCP server manifest (mcp.json / .well-known/mcp
+#              / an [tool.*mcp*] table). These say "this ships to others and they wire it in".
+#   APP      — runnable routes/webhooks (the scan found untrusted HTTP ingress) AND no publish target.
+# Default when neither is clear: LIBRARY (the conservative, inherited-risk framing) at low confidence.
+_PUBLISH_MARKERS = ("[project.scripts]", "[project.entry-points", "console_scripts", "entry_points",
+                    "[tool.poetry.scripts]", "project.gui-scripts")
+_MCP_MARKERS = ("mcp.json", "mcp_server", "modelcontextprotocol", "fastmcp", "mcp.server")
+
+
+def detect_repo_kind(root, scan=None) -> dict:
+    """Classify the scanned repo as an 'app' or a 'library' (incl. MCP-server) so the customer report can
+    frame the headline honestly. Returns {kind, confidence, reason, has_publish_target, has_routes}.
+    Read-only: inspects packaging files + the scan's ingresses only."""
+    root = Path(root)
+    has_publish, publish_why = False, ""
+    has_mcp = False
+    try:
+        for name in ("pyproject.toml", "setup.py", "setup.cfg"):
+            p = root / name
+            if not p.is_file():
+                continue
+            txt = p.read_text(encoding="utf-8", errors="ignore")
+            low = txt.lower()
+            if any(mk in low for mk in _PUBLISH_MARKERS):
+                has_publish, publish_why = True, f"{name} declares a publish target (scripts/entry-points)"
+            if any(mk in low for mk in _MCP_MARKERS):
+                has_mcp = True
+        # An MCP manifest anywhere near the root is a strong library/server signal.
+        for cand in (root / "mcp.json", root / ".well-known" / "mcp.json"):
+            if cand.is_file():
+                has_mcp = True
+    except OSError:
+        pass
+    if has_mcp and not has_publish:
+        has_publish, publish_why = True, "MCP server manifest present (installed + wired by others)"
+    # Untrusted routes/webhooks — an app runs its own ingress. Prefer the live scan's detected ingresses.
+    has_routes = bool(scan and scan.get("ingresses"))
+    if has_publish:
+        return {"kind": "library", "confidence": "high", "reason": publish_why,
+                "has_publish_target": True, "has_routes": has_routes}
+    if has_routes:
+        return {"kind": "app", "confidence": "high",
+                "reason": "runnable routes/webhooks present and no publish target — this runs its own entrypoints",
+                "has_publish_target": False, "has_routes": True}
+    return {"kind": "library", "confidence": "low",
+            "reason": "no publish target and no routes detected — defaulting to the conservative inherited-risk (library) framing",
+            "has_publish_target": False, "has_routes": False}
 
 
 def verdict_band(reachable: int, proven: int, install_liab: int, amber_actions: int = 0,
@@ -517,10 +599,23 @@ def build_report(root, scan, validated=None) -> dict:
     candidate_crit = sorted(candidate_crit, key=_severity_sort_key)
     non_gated = sorted(non_gated, key=_severity_sort_key)
     reachability_unknown = sorted(reachability_unknown, key=_severity_sort_key)
+    # STABLE-IDENTITY DEDUP (report-truth): ONE physical sink at (file, line, capability) is ONE inherited
+    # risk — not N. The same RCE-class sink can enter the reachability-unknown set more than once (reached
+    # from two callers, or surfaced by two detection passes on the same call), which used to print e.g.
+    # `modal_sandbox_v2.py:166` twice AND inflate the count. Collapse by stable identity so the count and the
+    # printed rows agree and neither double-lists a single sink. Deterministic (order-preserving on the
+    # already-sorted list); an AI guess can never reach here (static-only upstream).
+    reachability_unknown = _dedup_by_identity(reachability_unknown)
     proven_live = sorted(proven_live, key=_severity_sort_key)
 
+    repo_kind = detect_repo_kind(root, scan)
     return {
         "repo": root.name,
+        # CONTEXT-AWARE framing (app vs library/MCP-server). Shared by the MD + HTML report so the headline
+        # is honest: an app's install-liability is N/A (nobody installs an app); a library's is the headline.
+        "repo_kind": repo_kind["kind"],
+        "repo_kind_reason": repo_kind["reason"],
+        "repo_kind_confidence": repo_kind["confidence"],
         # --- OWASP risk rating: headline from PROVEN-LIVE only; candidates counted, never badged ---
         "overall_rating": overall,                 # driven by PoC-proven findings ONLY
         "risk_ratings": risk_counts,               # PROVEN-only High/Med/Low
@@ -614,13 +709,19 @@ def render(report: dict) -> str:
         L.append("")
     ilr = r.get("install_liability_rating", {})
     band = ilr.get("band", "Low")
-    L.append(f"## 🟠 INSTALL-LIABILITY (RCE-class): {r['install_liability_rce']}  ·  inherited rating: {band}")
+    n_il = r.get("install_liability_rce", 0)
+    # HONESTY: a rating on an EMPTY set is meaningless — "inherited rating: Low" on 0 inherited surfaces
+    # reads as a residual-risk score on nothing. Show the inherited band ONLY when there is at least one
+    # install-liability surface to rate; otherwise print the count alone.
+    rating_suffix = f"  ·  inherited rating: {band}" if n_il else ""
+    L.append(f"## 🟠 INSTALL-LIABILITY (RCE-class): {n_il}{rating_suffix}")
     L.append("Proven inert in THIS repo (no local entrypoint AND no untrusted ingress/unresolved dispatch reaches")
     L.append("them) — but a live attack surface the moment a new user installs/wires this tool into an agent that")
     L.append("feeds it untrusted input. The risk you INHERIT. (Sinks we could not prove inert are listed above")
     L.append("under REACHABILITY UNKNOWN, not here.)")
-    L.append(f"- **Inherited rating: {band}** — OWASP severity×likelihood at an as-installed likelihood "
-             f"({ilr.get('as_installed_likelihood', 2)}); per-surface capped at Med (inert here). The "
-             f"High band (≥100) is an aggregate-count signal of a large inherited attack surface, NOT a "
-             f"per-surface 'exploitable here' verdict. Bands: Low ≤16 · Med 17-99 · High ≥100.")
+    if n_il:
+        L.append(f"- **Inherited rating: {band}** — OWASP severity×likelihood at an as-installed likelihood "
+                 f"({ilr.get('as_installed_likelihood', 2)}); per-surface capped at Med (inert here). The "
+                 f"High band (≥100) is an aggregate-count signal of a large inherited attack surface, NOT a "
+                 f"per-surface 'exploitable here' verdict. Bands: Low ≤16 · Med 17-99 · High ≥100.")
     return "\n".join(L)

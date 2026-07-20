@@ -59,7 +59,7 @@ dangerous one. Re-validation of this core against the independent assessment (la
   HTML red/amber banners, and — for the fix-plan/Repairer-feed partition — that an amber action is routed to
   the review tier (never the red fix-first table) and is never `block_live_promotion`, that a red action still
   blocks, and that hard-block verdicts still block. (Shipped suite count for this release is recorded once,
-  at the end of this entry: **463 passed, 0 skipped**.)
+  at the end of this entry: **517 passed, 0 skipped** in the portable sandbox-free config.)
 
 ### Changed — DEDUP HARDENING: "a safe sink can no longer hide a dangerous one" (Fable-5 under-report class, structurally closed)
 
@@ -116,8 +116,10 @@ dangerous one. Re-validation of this core against the independent assessment (la
   in both source orders** (order-independence); (2) the **collapse invariant itself**, parametrised across
   taint / destination / shell / guard-strength / context(mutating) / amber-action / amber-fixed — survivor
   band == max band over all raw members, one row per partition, with the promotion recorded; plus
-  all-benign-keeps-display and non-partitioned-surfaces-untouched cases. Full suite: **463 passed, 0
-  skipped**.
+  all-benign-keeps-display and non-partitioned-surfaces-untouched cases. Suite (portable sandbox-free
+  config, the two env-dependent sandbox suites `test_prove_lane.py` + `test_s8_94_live_scan.py` excluded):
+  **517 passed, 0 skipped** — 575 tests collected in total, the extra 58 being the `--prove` / live-scan
+  lanes that pass under a working bubblewrap sandbox and skip without one.
 
 ## [0.7.1] — 2026-07-17  ·  FIRST PUBLIC RELEASE (launch-hardening)
 

@@ -76,3 +76,46 @@ def test_build_report_emits_rating():
     md = IR.render(rep)
     assert "inherited rating: Med" in md
     assert "aggregate-count signal" in md
+
+
+# --- NIT 4: never print an "inherited rating" on an EMPTY install-liability set ---------------------
+def test_render_omits_inherited_rating_when_no_install_liability():
+    # a clean scan with ZERO install-liability surfaces must NOT show "inherited rating: Low" — a rating
+    # on an empty set reads as a residual-risk score on nothing.
+    scan = {"surfaces": [], "files_scanned": 3}
+    rep = IR.build_report(Path("."), scan)
+    assert rep["install_liability_rce"] == 0
+    md = IR.render(rep)
+    assert "INSTALL-LIABILITY (RCE-class): 0" in md      # the count line still renders
+    assert "inherited rating" not in md                  # ...but the rating label does NOT
+    assert "Inherited rating:" not in md                 # ...nor the detail bullet
+    # the rating STILL rides when there IS something to rate (guards against over-suppression)
+    liab = [SimpleNamespace(capability="code_exec", verdict="NEEDS_CALL_GRAPH", context="prod",
+                            file_path=f"pkg/m{i}.py", line_start=1, sink_line=0, tainted_reachable=False,
+                            language="python") for i in range(3)]
+    md2 = IR.render(IR.build_report(Path("."), {"surfaces": liab, "files_scanned": 3}))
+    assert "inherited rating:" in md2
+
+
+# --- NIT 1: REACHABILITY_UNKNOWN rows are de-duped by stable identity (file, line, capability) -------
+def test_reachability_unknown_deduped_by_stable_identity():
+    # TWO surfaces that are the SAME physical sink (same file+line+capability), reached from two callers.
+    # An untrusted ingress makes them reachability-unknown. They must collapse to ONE row + ONE count.
+    def _sink():
+        return SimpleNamespace(capability="code_exec", verdict="NEEDS_CALL_GRAPH", context="prod",
+                               detection_source="static", file_path="agent/modal_sandbox_v2.py",
+                               line_start=166, sink_line=166, tainted_reachable=False, language="python")
+    scan = {"surfaces": [_sink(), _sink()], "files_scanned": 5,
+            "ingresses": [SimpleNamespace(id="i1")]}   # untrusted ingress -> reachability-unknown, not inert
+    rep = IR.build_report(Path("."), scan)
+    assert rep["reachability_unknown"] == 1, "the same sink at one line must count once, not twice"
+    items = rep["reachability_unknown_items"]
+    assert len(items) == 1
+    assert items[0]["file"].endswith("modal_sandbox_v2.py") and items[0]["line"] == 166
+    # genuinely-distinct sinks (different line) are NOT collapsed
+    s2 = SimpleNamespace(capability="code_exec", verdict="NEEDS_CALL_GRAPH", context="prod",
+                         detection_source="static", file_path="agent/modal_sandbox_v2.py",
+                         line_start=200, sink_line=200, tainted_reachable=False, language="python")
+    rep2 = IR.build_report(Path("."), {"surfaces": [_sink(), _sink(), s2], "files_scanned": 5,
+                                       "ingresses": [SimpleNamespace(id="i1")]})
+    assert rep2["reachability_unknown"] == 2

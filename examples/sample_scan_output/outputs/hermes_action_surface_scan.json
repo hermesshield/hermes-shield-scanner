@@ -1,10 +1,21 @@
 {
   "files_scanned": 2,
-  "head": "4eeb11278553",
-  "ingresses": [],
-  "root": "examples/vulnerable_agent",
-  "scan_time": "2026-07-09T14:06:14+01:00",
-  "scanner_version": "0.1.0",
+  "head": "c70d978bb43d",
+  "ingresses": [
+    {
+      "classification": "unfenced",
+      "context": "prod",
+      "fence_markers": [],
+      "fenced": false,
+      "file_path": "app.py",
+      "id": "app.py:http_route",
+      "line": 0,
+      "source_type": "http_route"
+    }
+  ],
+  "root": "/home/hartley/hermes-shield-scanner/examples/vulnerable_agent",
+  "scan_time": "2026-07-20T12:24:32+01:00",
+  "scanner_version": "0.8.0",
   "surfaces": [
     {
       "ai_confidence": 0.0,
@@ -76,6 +87,8 @@
       "static_artifact_type": "",
       "symbol": "run",
       "taint_source": "",
+      "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -151,7 +164,7 @@
       "protection_confidence": "low",
       "risk_level": "critical",
       "scope": "untested_gap",
-      "severity_rank": 4,
+      "severity_rank": 0,
       "shell_form": true,
       "sink_detection_mode": "ast_call",
       "sink_line": 9,
@@ -159,14 +172,16 @@
       "stable_id": "app.py::run::code_exec::eval",
       "static_artifact_type": "",
       "symbol": "run",
-      "taint_source": "",
-      "tainted_reachable": false,
+      "taint_source": "untrusted source",
+      "tainted_destination": false,
+      "tainted_executable": false,
+      "tainted_reachable": true,
       "tests": {
         "adversarial": false,
         "mutation": false,
         "test_files": []
       },
-      "verdict": "BLOCK_LIVE_PROMOTION"
+      "verdict": "UNGUARDED_CRITICAL_LIVE_SINK"
     },
     {
       "ai_confidence": 0.0,
@@ -238,6 +253,8 @@
       "static_artifact_type": "",
       "symbol": "run",
       "taint_source": "",
+      "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,
@@ -322,6 +339,8 @@
       "static_artifact_type": "",
       "symbol": "run_shell",
       "taint_source": "",
+      "tainted_destination": false,
+      "tainted_executable": false,
       "tainted_reachable": false,
       "tests": {
         "adversarial": false,

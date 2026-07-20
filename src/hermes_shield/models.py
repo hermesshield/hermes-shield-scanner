@@ -176,6 +176,14 @@ class PatchPlanItem:
     suggested_test: str
     human_approval_required: bool
     block_live_promotion: bool
+    # DE-NOISE grouping — the FULL inventory is kept (one row per call site), but every row now carries the
+    # single real CONTROL POINT it closes under so the human report can render ONE fix-card per group
+    # ("this one gate covers 388 call sites") without dropping a single row. See patch_plan.control_point.
+    capability: str = ""
+    verdict: str = ""
+    fix_group_id: str = ""        # stable slug of the control point (rows sharing it close under one fix)
+    control_point: str = ""       # human label of that control point
+    fix_class: str = "gate"       # gate | review | held | informational (de-noise reclassification)
 
     def to_dict(self):
         return asdict(self)

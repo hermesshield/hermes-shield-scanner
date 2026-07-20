@@ -123,6 +123,12 @@ _EXTRA_NAME_SINKS = {
     "PythonREPL": "code_exec", "PythonREPLTool": "code_exec", "PythonAstREPLTool": "code_exec",
     "PythonAstREPLTool": "code_exec", "PALChain": "code_exec",
 }
+# READ-ONLY model-invocation verbs. A call INTO an LLM is a mapped surface but NEVER a dangerous action and
+# NEVER RED (mutating=False) — its peers (chat/completions `.create`) are already read-only model_call, but a
+# custom adapter's `invoke_llm(...)` had no matcher and fell through UNSTAMPED, leaving a taxonomy coverage
+# gap. Distinctive names only (no real SDK maps these to a dangerous op), so a generic agent-tool `.invoke()`
+# / `.run()` (tool_invoke) is untouched. Restores the model_call/READ_ONLY stamp for the LLM-adapter shape.
+_MODEL_CALL_NAMES = {"invoke_llm", "call_llm"}
 # S8 COMPOUNDING: distinctive sink names the AI finder confirmed on past repos, absorbed as free static
 # rules. Loaded at import; reload_learned() re-reads after the autoresearch loop absorbs new ones.
 from . import learned_sinks as _learned_sinks
@@ -499,6 +505,14 @@ _STATUS_BENIGN_NAMES = {"update_status"}
 # genuinely captures a payment), in which case defer to the library-aware matcher.
 _TELEMETRY_BENIGN_NAMES = {"capture", "track", "incr", "increment", "gauge", "timing", "histogram",
                           "observe", "record_metric", "add_metric", "set_tag"}
+# SPAN/TELEMETRY-EVENT-benign: OpenTelemetry / tracing span verbs. Recording an event, attribute, exception or
+# status on a trace span is observability, never an agent action. These are distinctive OTel-span verbs, so —
+# exactly like the logging/telemetry families above — they only ever quiet the WEAK GENERIC residue
+# (tool_invoke/unknown_action) that a framework-rooted receiver (`agent_step_span` on a langgraph/crewai object)
+# picks up; a SPECIFIC sink matcher has already WON before Pass-A runs, so `span.send_email(...)` still fires.
+# Verb-keyed, defers to specific sinks — mirrors _BENIGN_LOG_NAMES exactly.
+_BENIGN_SPAN_NAMES = {"add_event", "set_attribute", "set_attributes", "record_exception", "add_link",
+                     "update_name", "start_span", "end_span", "start_as_current_span"}
 # NOTE (FN-2 evasion fix): the OLD blanket `_BENIGN_RECEIVERS` family (`logger`/`log`/`metrics`/`tracer`/
 # `statsd`/...) has been REMOVED. It silenced EVERY verb on a receiver with one of those names, so a malicious
 # author (we scan UNTRUSTED / AI-generated code) could evade detection by simply naming a dangerous receiver
@@ -515,7 +529,8 @@ _GENERIC_RESIDUE_CAPS = {"tool_invoke", "unknown_action"}
 # allowlist suppresses a generic-residue call ONLY when its method name is one of these. By construction NONE of
 # these is a dangerous verb (run / invoke / arun / call_tool / run_tool / charge / send_* / put_object / ... are
 # all absent), so a real agent-action surface can never be silenced by this list.
-_BENIGN_RESIDUE_VERBS = (_HARD_BENIGN_NAMES | _TELEMETRY_BENIGN_NAMES | _STATUS_BENIGN_NAMES)
+_BENIGN_RESIDUE_VERBS = (_HARD_BENIGN_NAMES | _TELEMETRY_BENIGN_NAMES | _STATUS_BENIGN_NAMES
+                         | _BENIGN_SPAN_NAMES)
 
 
 def _classify_call(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None,
@@ -587,6 +602,11 @@ def _classify_call_impl(node: ast.Call, sym_alias=None, mod_alias=None, inst_map
                 blob += a.value.lower()
         if any(k in blob for k in ("input_image", "image_url", "vision")):
             return "vision_model_call", False, "ast_call", None
+        return "model_call", False, "ast_call", None
+
+    # LLM-adapter invocation verbs -> read-only model_call (mapped, never an action / never RED). Distinctive
+    # names (invoke_llm / call_llm), so a generic agent-tool .invoke()/.run() is never downgraded here.
+    if bare in _MODEL_CALL_NAMES:
         return "model_call", False, "ast_call", None
 
     # code execution (BUILTINS — Name calls only, so df.eval / re.compile attr-calls don't false-fire)
