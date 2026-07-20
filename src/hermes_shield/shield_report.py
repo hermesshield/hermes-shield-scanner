@@ -882,11 +882,9 @@ h2{{font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spa
 color:var(--blaze);margin:56px 0 8px;font-weight:600;border-top:1px solid var(--line);padding-top:30px}}
 h2 .c{{color:var(--muted);font-weight:400;letter-spacing:.02em;text-transform:none;margin-left:8px}}
 /* Reachability-unknown band — amber-flagged, visually distinct from the deterministic verdict/counts. */
-h2.ruflag{{color:var(--blaze);border-left:4px solid var(--blaze);padding-left:14px;
-background:linear-gradient(90deg,rgba(250,125,9,.08),transparent 60%)}}
+h2.ruflag{{color:var(--blaze);border-left:4px solid var(--blaze);padding-left:14px;margin-left:-18px}}
 /* AI-suspected band — sky/blue-flagged, advisory, clearly OUTSIDE the deterministic verdict/counts. */
-h2.aiflag{{color:var(--sky);border-left:4px solid var(--sky);padding-left:14px;
-background:linear-gradient(90deg,rgba(43,125,226,.08),transparent 60%)}}
+h2.aiflag{{color:var(--sky);border-left:4px solid var(--sky);padding-left:14px;margin-left:-18px}}
 h3{{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;
 color:var(--apricot);margin:28px 0 6px;font-weight:600}}
 h3 .c{{color:var(--faint);font-weight:400;letter-spacing:.02em;text-transform:none;margin-left:8px}}
@@ -914,6 +912,13 @@ text-transform:uppercase;padding:3px 9px;border-radius:999px;white-space:nowrap}
 .fsn{{display:block;font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.08em;
 text-transform:uppercase;color:var(--blaze);margin-bottom:3px}}
 .fstep:last-child .fsn{{color:var(--sky)}}
+/* ---- the fix plan is THE action — elevate it into a prominent warm card ---- */
+.fixwrap{{border:1px solid rgba(250,125,9,.34);border-left:4px solid var(--blaze);
+background:linear-gradient(180deg,rgba(250,125,9,.06),rgba(250,125,9,.015));
+border-radius:6px 20px 20px 6px;padding:6px 26px 30px;margin:52px 0 0}}
+h2.fixh2{{font-size:15px;letter-spacing:.05em;color:var(--cream);border-top:none;padding-top:24px;margin:0 0 6px}}
+h2.fixh2 .c{{color:var(--blaze);text-transform:none;letter-spacing:.02em}}
+.fixwrap .ctrl{{font-size:13.5px}}
 /* ---- the honest proof callout (fact, not fear) ---- */
 .proofcall{{background:rgba(82,189,255,.07);border:1px solid rgba(82,189,255,.32);border-left:4px solid var(--sky);
 border-radius:0 12px 12px 0;padding:14px 20px;margin:0 0 18px;color:var(--cream);font-size:14.5px;
@@ -1005,7 +1010,8 @@ executed · the deterministic core makes no network calls (optional --ai/--deps 
 
 {reach_unknown_html}
 
-<h2>▸ Fix plan <span class=c>— generated, not applied</span></h2>
+<section class=fixwrap>
+<h2 class=fixh2>▸ Fix plan <span class=c>— generated, not applied</span></h2>
 <div class=tier>Fix-at-source controls for the findings that need one — <b>every row is two steps</b>: Step 1
 the control (the free directional advice), Step 2 the adversarial proof-test that shows it actually blocks.
 <b>The scanner plans these; it does not modify your code.</b></div>
@@ -1022,6 +1028,7 @@ to blocked (RED→PROTECTED), re-verified by the same scanner</b> — human-gate
 {fixplan_review_block}
 {fixplan_wiring_block}
 {fixplan_held_block}
+</section>
 
 <div class=cta>
   <div class=k>▸ what happens next</div>
