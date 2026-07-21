@@ -296,7 +296,9 @@ def main(argv=None):
                         help="the live HUD is now the DEFAULT on a terminal; --live is kept as a no-op alias. "
                              "Use --quiet for plain output. (The HUD stays TTY-only: a non-TTY/piped run always "
                              "gets byte-clean, JSON-safe stdout, whether or not --live is passed.)")
-        sp.add_argument("--quiet", action="store_true")
+        sp.add_argument("--quiet", action="store_true",
+                        help="plain, JSON-safe stdout with no live HUD — the CI / agent / JSON-piping mode "
+                             "(a non-TTY/piped run is already byte-clean; --quiet also silences a TTY run).")
     dp = sub.add_parser("demo",
                         help="scan a bundled, deliberately vulnerable toy agent — a real red "
                              "report in ~10 seconds (fixtures ship as inert .txt package data, "
@@ -314,7 +316,9 @@ def main(argv=None):
                     help="the live HUD is now the DEFAULT on a terminal; --live is kept as a no-op alias. "
                          "Use --quiet for plain output. (The HUD stays TTY-only; a non-TTY/piped run is "
                          "unchanged whether or not --live is passed.)")
-    dp.add_argument("--quiet", action="store_true")
+    dp.add_argument("--quiet", action="store_true",
+                    help="plain, JSON-safe stdout with no live HUD — the CI / agent / JSON-piping mode "
+                         "(a non-TTY/piped run is already byte-clean; --quiet also silences a TTY run).")
     sub.add_parser("version")
     args = ap.parse_args(argv)
 

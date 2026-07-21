@@ -58,7 +58,7 @@ And no — this is not "just static analysis". It is **deterministic static anal
 
 </div>
 
-## `▸ quickstart`
+## `▸ commands & flags`
 
 **You never need a flag for a first scan.**
 
@@ -120,6 +120,127 @@ hermes-shield scan ./repo --prove        # + sandboxed self-attack: PROVE a cand
 hermes-shield scan ./repo --quiet        # plain output instead of the live HUD (the HUD is the default on a terminal)
 hermes-shield diff ./repo                # scan + compare against a saved baseline
 ```
+
+### Every command
+
+| Command | What it does |
+|---|---|
+| `hermes-shield` | Prints help and exits `0`. |
+| `hermes-shield demo` | Scan a bundled, deliberately vulnerable toy agent — a real red report in ~10s. Fixtures ship **inert** (`.txt` package data → temp dir → **never executed**); none of your code is scanned. |
+| `hermes-shield scan [target]` | Scan a repo. No `target` → **auto-detects the enclosing git repo** of the CWD; or pass any explicit path (any repo on disk). |
+| `hermes-shield diff [target]` | Scan and compare against a saved baseline. |
+| `hermes-shield export-dashboard [target]` | Scan and write the dashboard JSON export. |
+| `hermes-shield patch-plan [target]` | Scan and write the grouped fix plan. |
+| `hermes-shield version` | Print the scanner version (`--version` also works at the top level). |
+
+### Every flag
+
+A first scan needs none of these. `demo` takes only `--out`/`--live`/`--quiet`/`--prove`; `--ai-deep` is `scan`-only; `--prove` applies to `scan` and `demo`.
+
+| Flag | Applies to | What it does |
+|---|---|---|
+| `--out DIR` | scan · diff · export-dashboard · patch-plan · demo | Output dir for artefacts (default `./shield-report/`). Env: `HERMES_SHIELD_OUT`. |
+| `--live` | scan · diff · export-dashboard · patch-plan · demo | No-op alias — the live HUD is already the terminal default. A non-TTY/piped run is always byte-clean, JSON-safe. |
+| `--quiet` | scan · diff · export-dashboard · patch-plan · demo | Plain, JSON-safe stdout, no HUD — **the CI / agent / piping mode**. |
+| `--ai` | scan · diff · export-dashboard · patch-plan | Per-file AI-assist recall via your own local `claude` CLI (**sends code to Anthropic under _your_ account; no key stored in the package**). Advisory, non-deterministic, **never in the deterministic headline**. OFF by default. |
+| `--ai-backend {claude,ollama}` | with `--ai` | AI transport (default `claude`). `ollama` = a **local, zero-egress** model via localhost Ollama (`HERMES_SHIELD_OLLAMA_HOST` / `_MODEL`). Only meaningful with `--ai`; does **not** apply to `--ai-deep`. |
+| `--ai-deep` | scan | Whole-repo agentic AI finder — slower + deeper than `--ai`; the same pass the post-scan prompt offers. Advisory; **Claude-only for now**; OFF by default. Env: `HERMES_SHIELD_AI_FINDER=1`. |
+| `--semgrep` | scan · diff · export-dashboard · patch-plan | Semgrep comparator tier (~30-language breadth; deterministic; needs `semgrep` installed). Attributed separately, **never merged into the headline**. |
+| `--deps` | scan · diff · export-dashboard · patch-plan | Also fetch + scan the repo's **own pinned first-party** packages (wheels only — **never installed, never executed**; **reaches the network**). Not in `--all`. OFF by default. |
+| `--all` | scan · diff · export-dashboard · patch-plan | Full coverage: core + `--semgrep` + `--ai`. **Excludes** `--deps` and `--prove`. |
+| `--prove` | scan · demo | PROVEN-LIVE self-attack: **executes** drivable candidate sinks inside a **network-denied sandbox** (benign canary, clean negative control) to prove they are live. Consent-gated; OFF by default; **only run on a repo you trust**. |
+| `--yes-execute-my-code` | with `--prove` | Non-interactive consent for `--prove` (also `HERMES_SHIELD_PROVE_CONSENT=1`). |
+| `--version` | top-level | Print the scanner version. |
+
+### `--help`, verbatim
+
+```text
+$ hermes-shield --help
+usage: hermes-shield [-h] [--version]
+                     {scan,diff,export-dashboard,patch-plan,demo,version} ...
+
+Hermes Shield scanner (local, read-only)
+
+positional arguments:
+  {scan,diff,export-dashboard,patch-plan,demo,version}
+    demo                scan a bundled, deliberately vulnerable toy agent — a
+                        real red report in ~10 seconds (fixtures ship as inert
+                        .txt package data, copied to a temp dir; nothing is
+                        executed)
+
+options:
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit
+
+Exit code: hermes-shield returns 0 regardless of findings (a RED report does NOT fail the
+process). For CI gating, parse the verdict from the report JSON
+(shield-report/outputs/hermes_shield_report.json). A --fail-on flag is a future enhancement.
+```
+
+```text
+$ hermes-shield scan --help
+usage: hermes-shield scan [-h] [--out OUT] [--ai]
+                          [--ai-backend {claude,ollama}] [--semgrep] [--all]
+                          [--deps] [--prove] [--yes-execute-my-code]
+                          [--ai-deep] [--live] [--quiet]
+                          [target]
+
+positional arguments:
+  target                target repo path (default: enclosing git repo of the
+                        CWD)
+
+options:
+  -h, --help            show this help message and exit
+  --out OUT             output dir for scan artefacts (default: ./shield-
+                        report/ in the CWD)
+  --ai                  AI-assist: fast, per-FILE novel-sink recall (uses your
+                        local `claude`, sends code to Anthropic under YOUR
+                        account). Advisory, non-deterministic; OFF by default.
+                        For the whole-repo, slower + deeper pass see --ai-
+                        deep.
+  --ai-backend {claude,ollama}
+                        AI-assist backend transport (default: claude, the
+                        historical path). 'ollama' runs a LOCAL, zero-egress
+                        model via localhost Ollama (HERMES_SHIELD_OLLAMA_HOST
+                        / HERMES_SHIELD_OLLAMA_MODEL). Only meaningful with
+                        --ai; absent => claude (byte-identical to today).
+  --semgrep             enable the semgrep comparator tier (multi-language
+                        breadth; deterministic; needs `semgrep` installed)
+  --all                 full coverage: run the core + --semgrep + --ai in one
+                        command
+  --deps                dependency-aware scan: also fetch + scan the repo's
+                        OWN pinned first-party packages (catches a capability
+                        relocated into a dep not in the tree; needs network +
+                        pip; static only, never installs/executes; OFF by
+                        default). Not included in --all because it reaches the
+                        network.
+  --prove               PROVEN-LIVE self-attack lane (Phase 1): after the
+                        read-only scan, EXECUTE the drivable candidate RCE
+                        sinks of the REAL target inside a sandbox to prove
+                        they are live (benign canary, no network). Consent-
+                        gated; OFF by default; NOT part of --all. Only run
+                        this on a repo you trust.
+  --yes-execute-my-code
+                        non-interactive consent for --prove (also:
+                        HERMES_SHIELD_PROVE_CONSENT=1)
+  --ai-deep             whole-REPO agentic AI finder — slower + deeper than
+                        --ai; same as accepting the post-scan prompt. Advisory
+                        ai_suspected surfaces; reads across the repo; non-
+                        deterministic; Claude-only for now — needs the
+                        `claude` CLI, and --ai-backend does NOT apply to it;
+                        OFF by default. Env equivalent:
+                        HERMES_SHIELD_AI_FINDER=1.
+  --live                the live HUD is now the DEFAULT on a terminal; --live
+                        is kept as a no-op alias. Use --quiet for plain
+                        output. (The HUD stays TTY-only: a non-TTY/piped run
+                        always gets byte-clean, JSON-safe stdout, whether or
+                        not --live is passed.)
+  --quiet               plain, JSON-safe stdout with no live HUD — the CI /
+                        agent / JSON-piping mode (a non-TTY/piped run is
+                        already byte-clean; --quiet also silences a TTY run).
+```
+
+> **The exit-code epilog is load-bearing.** `hermes-shield` **always exits `0`**, regardless of findings — a RED report does **not** fail the process. **To gate CI, parse `hermes_shield_report.json`** (check the verdict / reachable-unguarded / proven-live counts). A dedicated `--fail-on` flag is a planned future enhancement, not available today.
 
 ## `▸ how_it_works` — Map → Trace → Prove
 
@@ -183,7 +304,7 @@ And the line we will never soften: **a clean result means "no path was proven" �
 |---|---|---|---|
 | 🔍 | **Scanner** | **Discovery** — map, trace and prove your agent's action surface. This repo. | **Free · here now** |
 | 🔧 | **Repairer** | Applies the fixes — diff-proposed, **human-approved, never auto-fix**, re-scanned to confirm. | **Paid · coming — [join early access](https://hermesshield.ai/register-interest)** |
-| 🛡️ | **Shield** | Always-on runtime action firewall — **Kill Switch, Action Gates, Audit Trail** on every action the agent takes. | **Paid · recruiting a founding cohort** |
+| 🛡️ | **Shield** | Always-on runtime action firewall — **Kill Switch, Action Gates, Audit Trail** on every action the agent takes. | **Paid · [recruiting a founding cohort](https://t.me/hermesshield)** |
 | 🏛️ | **Enterprise** | Custom deployment, compliance mapping, dedicated support. | [Talk to us](mailto:hello@hermesshield.ai) |
 
 The Scanner shows you the blast radius. The Repairer closes it. The Shield keeps it closed while the agent runs.
@@ -195,6 +316,7 @@ Found a bug or a sink we missed? **Open an issue** — a missed-detection report
 ## `▸ links`
 
 - **Website:** [hermesshield.ai](https://hermesshield.ai) · [Free scan](https://hermesshield.ai/free-scan) · [Methodology](https://hermesshield.ai/methodology) · [Scanner](https://hermesshield.ai/scanner)
+- **Telegram:** [Join the founding cohort →](https://t.me/hermesshield)
 - **X:** [@hermesshield](https://x.com/hermesshield) (company) · [@harleyfoote_](https://x.com/harleyfoote_) (founder) · [@fridayresearch_](https://x.com/fridayresearch_)
 - **LinkedIn:** [Hermes Shield](https://www.linkedin.com/company/hermes-shield)
 - **Email:** [hello@hermesshield.ai](mailto:hello@hermesshield.ai)
