@@ -445,21 +445,148 @@ def test_nonzero_exit_with_json_error_payload_raises(monkeypatch):
 # --- (9) FIX 3: a refusal with a stray bracket pair is still detected --------------------------------
 
 def test_is_refusal_truth_table():
-    """FIX 3: only a bracketed span that PARSES as a JSON array defeats the refusal check. Keeps the
-    existing true-negatives AND detects a refusal that merely contains a non-parsing '[x]'."""
+    """_is_refusal is now ENRICHMENT-ONLY — the STRUCTURAL guard (exit 0 + no parseable JSON array) decides
+    pass/fail; _is_refusal only picks the friendlier reason text. It keeps the existing true-negatives AND
+    detects a refusal that merely contains a non-parsing '[x]'."""
     # legitimate empty result — NOT a refusal
     assert ai_finder._is_refusal("[]") is False
     # a real findings array — NOT a refusal
     assert ai_finder._is_refusal(_FAKE_FINDING) is False
-    # terse 'nothing' prose without a signature — NOT a refusal
+    # terse 'nothing' prose without a signature — NOT a refusal (yet FAILS structurally at the agent; see
+    # test_finder_exit0_arbitrary_prose_without_json_raises)
     assert ai_finder._is_refusal("found nothing") is False
     # a real AUP refusal — IS a refusal
     real = ("API Error: safeguards flagged this message as violating our usage policies. "
             "Claude Code can't respond to this request. https://www.anthropic.com/legal/aup")
     assert ai_finder._is_refusal(real) is True
-    # the FIX: a refusal carrying a stray, non-parsing bracket pair is STILL detected
+    # newly-added markers enrich the reason for the common phrasings
+    assert ai_finder._is_refusal("I can't help with this. Acceptable Use Policy.") is True
+    # a refusal carrying a stray, non-parsing bracket pair is STILL detected
     assert ai_finder._is_refusal(
         "I can't respond to this request [x] — usage policies. https://www.anthropic.com/legal/aup") is True
+
+
+# --- (10) SHIP-BLOCKER (structural): exit-0 with no parseable JSON array = protocol violation -----------
+# The finder's STRICT-JSON contract: on exit 0 the ONLY honest reply is a parseable JSON array (empty [] =
+# nothing-found, or findings). Anything else on exit 0 — a non-marker refusal, arbitrary prose, truncation —
+# is a protocol violation the agent must FAIL LOUD on, never fall through _parse -> [] -> status "ok".
+
+_NON_MARKER_REFUSAL = "I'm sorry, but I won't be able to analyse this repository for you."
+_PROSE_NO_JSON = "Here is a prose summary of the repo, but I have produced no structured findings array."
+
+
+def test_finder_exit0_non_marker_refusal_raises(monkeypatch):
+    """A refusal phrased ENTIRELY OUTSIDE the marker set (exit 0, no JSON array) must raise on STRUCTURE —
+    the core silent-clean SHIP-BLOCKER. Marker matching alone would have parsed it to [] (a silent zero)."""
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run",
+                        lambda *a, **k: _proc(0, _NON_MARKER_REFUSAL, ""))
+    run = ai_finder._finder_agent("sonnet", 5)
+    with pytest.raises(AIAgentError) as ei:
+        run("prompt", "/tmp")
+    assert "parseable json array" in str(ei.value).lower()
+
+
+def test_finder_exit0_arbitrary_prose_without_json_raises(monkeypatch):
+    """Arbitrary exit-0 prose carrying no JSON array must raise (protocol violation), not fall through to []."""
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run",
+                        lambda *a, **k: _proc(0, _PROSE_NO_JSON, ""))
+    run = ai_finder._finder_agent("sonnet", 5)
+    with pytest.raises(AIAgentError) as ei:
+        run("prompt", "/tmp")
+    assert "parseable json array" in str(ei.value).lower()
+
+
+def test_finder_exit0_genuine_empty_array_is_nothing_found_not_raised(monkeypatch):
+    """MUST-NOT-OVER-CORRECT: a genuine `[]` (valid JSON array) on exit 0 is a real nothing-found — it
+    returns and parses to no findings, it does NOT raise."""
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run", lambda *a, **k: _proc(0, "[]", ""))
+    run = ai_finder._finder_agent("sonnet", 5)
+    out = run("prompt", "/tmp")
+    assert ai_finder._parse(out) == []                      # genuine empty result, no exception
+
+
+def test_finder_exit0_genuine_finding_is_returned(monkeypatch):
+    """A genuine findings array on exit 0 returns and parses to the real finding (the happy path)."""
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run", lambda *a, **k: _proc(0, _FAKE_FINDING, ""))
+    run = ai_finder._finder_agent("sonnet", 5)
+    out = run("prompt", "/tmp")
+    parsed = ai_finder._parse(out)
+    assert parsed and parsed[0]["file"] == "agent.py"
+
+
+# --- (11) SHIP-BLOCKER END-TO-END: the EXACT embedded-`[]` silent-cleans through _finder_agent ----------
+# The live hole the previous green suite MISSED: an exit-0 reply that CONTAINS a parseable `[]` defeated the
+# lenient `_json_array` guard, so an overload error / refusal / chatty prose was read as "ok/nothing found".
+# The strict `_is_toplevel_json_array` gate now fails each loud. Driven through the REAL _finder_agent leaf
+# (only the claude subprocess is mocked), then end-to-end through the wiring so a green here means a real hole
+# closed, not just a passing unit.
+
+_OVERLOAD_ERR = '{"type":"error","errors":[],"message":"overloaded"}'          # (1) rate-limit/overload OBJECT
+_REFUSAL_EMPTY = "I can't help with that. Here is an empty result: []"          # (2) refusal + trailing []
+_CHATTY_EMPTY = "Sure, here is my analysis. I found no dangerous surfaces: []"  # (3) chatty prose + trailing []
+_NONDICT_LIST = "[1]"                                                            # (4) a non-findings array
+
+_FINDER_SILENT_CLEANS = [
+    pytest.param(_OVERLOAD_ERR, id="overload_error_object"),
+    pytest.param(_REFUSAL_EMPTY, id="refusal_with_trailing_empty"),
+    pytest.param(_CHATTY_EMPTY, id="chatty_prose_with_trailing_empty"),
+    pytest.param(_NONDICT_LIST, id="nondict_list_[1]"),
+]
+
+
+@pytest.mark.parametrize("reply", _FINDER_SILENT_CLEANS)
+def test_finder_exit0_embedded_empty_silent_clean_raises(reply, monkeypatch):
+    """Each exit-0 reply carrying an embedded/ill-typed bracket span must raise AIAgentError on STRUCTURE —
+    the lenient `_json_array` guard passed all of these (they CONTAIN a parseable `[]`); the strict top-level
+    arbiter fails them loud."""
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run", lambda *a, **k: _proc(0, reply, ""))
+    run = ai_finder._finder_agent("sonnet", 5)
+    with pytest.raises(AIAgentError):
+        run("prompt", "/tmp")
+
+
+@pytest.mark.parametrize("reply", _FINDER_SILENT_CLEANS)
+def test_wiring_records_failed_status_on_embedded_empty_silent_clean(reply, tmp_path, monkeypatch):
+    """End-to-end: each exit-0 silent-clean from the REAL _finder_agent surfaces a VISIBLE failed status via
+    the wiring (fail-loud tier) while the deterministic scan still completes and no advisory surface leaks."""
+    root = _repo(tmp_path)
+    monkeypatch.setenv("HERMES_SHIELD_AI_FINDER", "1")
+
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setattr(ai_finder.subprocess, "run", lambda *a, **k: _proc(0, reply, ""))
+    scan = SH.run_scan(root, out_dir=_out(tmp_path))
+
+    assert scan["ai_finder"]["ai_finder_status"] == "failed", f"{reply!r} must fail the finder tier loud"
+    assert "ai_finder_error" in scan["ai_finder"]
+    assert not any(getattr(s, "detection_source", "static") == "ai_suspected" for s in scan["surfaces"])
+    # the deterministic scan still stands
+    assert any(getattr(s, "detection_source", "static") == "static" for s in scan["surfaces"])
+
+
+def test_finder_exit0_fenced_genuine_finding_is_returned(monkeypatch):
+    """MUST-NOT-OVER-CORRECT: a genuine findings array wrapped in a ```json fence still parses to the real
+    finding (the strict arbiter strips the fence) — a well-behaved fenced reply is not mis-failed."""
+    monkeypatch.setattr(ai_finder.shutil, "which", lambda _n: "/usr/bin/claude")
+    fenced = "```json\n" + _FAKE_FINDING + "\n```"
+    monkeypatch.setattr(ai_finder.subprocess, "run", lambda *a, **k: _proc(0, fenced, ""))
+    run = ai_finder._finder_agent("sonnet", 5)
+    parsed = ai_finder._parse(run("prompt", "/tmp"))
+    assert parsed and parsed[0]["file"] == "agent.py"
+
+
+def test_finder_toplevel_arbiter_rejects_nondict_and_error_object():
+    assert ai_finder._is_toplevel_json_array(_OVERLOAD_ERR) is None     # error OBJECT
+    assert ai_finder._is_toplevel_json_array("[1]") is None            # non-findings array
+    assert ai_finder._is_toplevel_json_array('["x"]') is None          # non-findings array
+    assert ai_finder._is_toplevel_json_array("[]") == []              # genuine empty -> passes
+    assert ai_finder._is_toplevel_json_array(_FAKE_FINDING) is not None  # genuine findings -> passes
+    assert ai_finder._is_toplevel_json_array("```json\n[]\n```") == []  # fenced empty -> passes
+    assert ai_finder._json_array(_OVERLOAD_ERR) == []                  # OLD lenient arbiter still accepts it
 
 
 def test_default_finder_model_is_not_fable(monkeypatch):

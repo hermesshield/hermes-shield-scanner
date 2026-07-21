@@ -71,6 +71,8 @@ _REFUSAL_MARKERS = (
     "cannot respond to this request",
     "usage policies",
     "usage policy",
+    "acceptable use policy",
+    "can't help",
     "https://www.anthropic.com/legal/aup",
 )
 
@@ -92,20 +94,39 @@ def _json_array(raw: str):
     return data if isinstance(data, list) else None
 
 
-def _is_toplevel_json_array(raw: str):
-    """Return the parsed list iff `raw`, stripped, IS itself a JSON array — not merely a string that
-    contains a bracketed span. This is the stricter arbiter used ONLY by the nonzero-exit guard: a backend
-    that failed (exit != 0) is trusted as a genuine result only when its whole stdout is the array, so a
-    JSON ERROR PAYLOAD such as `{"type":"error","errors":[],"message":"overloaded"}` (a rate-limit/overload
-    failure) can no longer masquerade as an empty finding set via its embedded `[]`."""
+def _strip_code_fence(raw: str) -> str:
+    """Strip a single surrounding markdown code fence (```json ... ``` / ``` ... ```) plus whitespace so the
+    top-level arbiter sees the reply's actual structure. A model that honours STRICT-JSON but wraps it in a
+    fence (common) must not be mis-read as a protocol violation; a fence-less reply is returned unchanged."""
     s = raw.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[^\n]*\n?", "", s)     # drop the opening fence line (``` or ```json)
+        s = re.sub(r"\n?```\s*$", "", s)         # drop the closing fence
+    return s.strip()
+
+
+def _is_toplevel_json_array(raw: str):
+    """Return the parsed list iff `raw` — after stripping a surrounding markdown code fence and whitespace —
+    IS ITSELF a well-formed JSON findings array (empty `[]`, or a list whose every element is an object),
+    not merely a string that contains a bracketed span. THE STRICT ARBITER: a backend reply is trusted as a
+    genuine result (nothing-found or findings) only when its whole stdout is that array. This rejects, in one
+    place, (a) a JSON ERROR PAYLOAD such as `{"type":"error","errors":[],"message":"overloaded"}` (a
+    rate-limit/overload failure) whose embedded `[]` would otherwise masquerade as an empty finding set,
+    (b) refusal/chatty prose that merely trails an incidental `[]`, and (c) a non-findings array like `[1]` /
+    `["x"]`. Used by BOTH the exit-0 and the nonzero-exit guards so neither can be defeated by an incidental
+    or ill-typed bracket span."""
+    s = _strip_code_fence(raw)
     if not (s.startswith("[") and s.endswith("]")):
         return None
     try:
         data = json.loads(s)
     except Exception:
         return None
-    return data if isinstance(data, list) else None
+    if not isinstance(data, list):
+        return None
+    if any(not isinstance(el, dict) for el in data):
+        return None      # a top-level array, but NOT a findings array (e.g. [1], ["x"]) -> protocol violation
+    return data
 
 
 def _is_refusal(text: str) -> bool:
@@ -177,11 +198,27 @@ def _finder_agent(model: str, timeout: int):
             tail = (stderr or out or "").strip().splitlines()
             detail = tail[-1][:160] if tail else "no output"
             raise AIAgentError(f"claude finder CLI exited {returncode}: {detail}")
-        if _is_refusal(out):
+        # STRUCTURAL SILENT-CLEAN CLOSE (SHIP-BLOCKER). The prompt contract demands STRICT JSON, so on an
+        # EXIT-0 reply the ONLY honest outcomes are a TOP-LEVEL JSON findings array: an empty `[]` (a genuine
+        # nothing-found) OR real finding objects. We gate on the STRICT arbiter `_is_toplevel_json_array` (the
+        # reply, after fence/whitespace stripping, must ITSELF be that array) — NOT the lenient bracketed-span
+        # `_json_array`, which an exit-0 reply merely CONTAINING a `[]` defeats. That lenient check silently
+        # passed three live cleans: (1) an overload/rate-limit ERROR OBJECT `{"...":"error","errors":[],...}`
+        # whose embedded `errors":[]` parses; (2) a refusal "...empty result: []"; (3) chatty prose
+        # "...found no dangerous surfaces: []". Each fell through _parse as [] -> status "ok" (a silent zero).
+        # Now any exit-0 reply that is not a top-level findings array (error object, prose-with-trailing-`[]`,
+        # or a non-findings array like `[1]`) FAILS LOUD — a VISIBLE failed status the wiring records.
+        # `_is_refusal` is kept ONLY to ENRICH the reason; it never decides pass/fail. A genuine `[]` or
+        # `[ {..} ]` still passes -> ok.
+        if returncode == 0 and _is_toplevel_json_array(out) is None:
             reason = out.strip().splitlines()[0][:160] if out.strip() else "no output"
+            if _is_refusal(out):
+                raise AIAgentError(
+                    f"claude finder backend '{model}' refused the security-auditor prompt "
+                    f"(content-policy refusal, exit {returncode}): {reason}")
             raise AIAgentError(
-                f"claude finder backend '{model}' refused the security-auditor prompt "
-                f"(content-policy refusal, exit {returncode}): {reason}")
+                f"claude finder backend '{model}' returned no parseable JSON array "
+                f"(protocol violation, exit {returncode}): {reason}")
         return out
     return run
 
