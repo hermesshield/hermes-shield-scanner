@@ -462,6 +462,46 @@ def _coverage_pct(root: Path, files_scanned: int) -> float:
     return round(100.0 * min(files_scanned, total) / total, 1)
 
 
+def ai_tier_health(scan) -> dict:
+    """SINGLE source of truth for OPTIONAL-AI-tier health, shared by EVERY render surface (the console
+    lines, the MD + HTML customer report, and the machine JSON) so the status can never disagree between
+    them. Covers BOTH opt-in AI tiers — the per-file `--ai` tier (scan['ai_tier_counts']) and the whole-repo
+    `--ai-deep` finder (scan['ai_finder']).
+
+    HONESTY INVARIANT: it NEVER conflates a backend FAILURE with a genuine nothing-found. A tier that RAN
+    and returned zero surfaces is `"ok"`; only a refused / broken / absent backend is `"failed"`; a tier
+    that was never enabled is `"off"`. Advisory ONLY — this reads the tier bookkeeping read-only and never
+    touches the deterministic counts."""
+    pf = scan.get("ai_tier_counts") or {}
+    fd = scan.get("ai_finder") or {}
+    # per-file --ai tier: ai_tier.apply sets ai_status="failed" + ai_failure; the outer except sets ai_error.
+    pf_fail = pf.get("ai_failure") or pf.get("ai_error")
+    pf_failed = bool(pf_fail) or pf.get("ai_status") == "failed"
+    pf_ran = bool(pf)
+    # --ai-deep finder: ai_finder sets ai_finder_status="failed" + ai_finder_error on a broken backend.
+    fd_fail = fd.get("ai_finder_error")
+    fd_failed = bool(fd_fail) or fd.get("ai_finder_status") == "failed"
+    fd_ran = bool(fd)
+    reasons = []
+    if pf_failed:
+        reasons.append(f"per-file --ai tier: {str(pf_fail or 'agent backend error')}")
+    if fd_failed:
+        reasons.append(f"--ai-deep finder: {str(fd_fail or 'agent backend error')}")
+    return {
+        "per_file_status": "failed" if pf_failed else ("ok" if pf_ran else "off"),
+        "per_file_failure": (str(pf_fail) if pf_fail else ("agent backend error" if pf_failed else None)),
+        "per_file_counts": {k: pf[k] for k in ("ai_calls", "ai_surfaces_added", "ai_corroborated",
+                                               "ai_target_files") if k in pf},
+        "finder_status": "failed" if fd_failed else ("ok" if fd_ran else "off"),
+        "finder_failure": (str(fd_fail) if fd_fail else ("agent backend error" if fd_failed else None)),
+        "finder_counts": {k: fd[k] for k in ("ai_finder_model", "ai_finder_proposed", "ai_finder_verified",
+                                             "ai_finder_added") if k in fd},
+        "any_ran": pf_ran or fd_ran,
+        "any_failed": pf_failed or fd_failed,
+        "failure_reason": ("; ".join(reasons) or None),
+    }
+
+
 def build_report(root, scan, validated=None) -> dict:
     """validated = set of (file_substr, line) that a HUMAN traced + a harmless PoC confirmed. Only these are
     PROVEN-LIVE. The scanner's raw grounded-critical are CANDIDATES (may include false positives) — never
@@ -651,6 +691,11 @@ def build_report(root, scan, validated=None) -> dict:
         "non_gated_items": [_row(s) for s in non_gated[:50]],
         "amber_action_items": [_row(s) for s in amber_actions[:50]],
         "fixed_dest_review_items": [_row(s) for s in fixed_dest_reviews[:50]],
+        # OPTIONAL-AI-tier health (BOTH tiers) — machine-readable status so a JSON consumer can SEE a backend
+        # FAILURE and never read a refused tier as a clean "nothing found". Advisory only: it carries status +
+        # the failure reason, NOT any surface, and is OUTSIDE every deterministic count above (AI-suspected
+        # surfaces never enter total/non_gated/coverage). When no AI tier ran, both sub-statuses are "off".
+        "ai_tier": ai_tier_health(scan),
     }
 
 

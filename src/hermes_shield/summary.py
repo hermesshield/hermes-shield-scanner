@@ -217,7 +217,9 @@ def render_results(report: dict, scan: dict, out_dir, version: str, colour: bool
     _ai = scan.get("ai_tier_counts") or {}
     _ai_fail = _ai.get("ai_failure") or _ai.get("ai_error")
     if _ai_fail or _ai.get("ai_status") == "failed":
-        L.append("      " + c(_RED, "AI tier: FAILED — ") + c(_GRY, str(_ai_fail or "agent backend error")[:80]) +
+        # Show the FULL refusal reason (already capped at ~200 chars upstream) — the old [:80] truncation cut
+        # the refusal mid-sentence, hiding WHY the backend refused. A slightly longer line is worth the truth.
+        L.append("      " + c(_RED, "AI tier: FAILED — ") + c(_GRY, str(_ai_fail or "agent backend error")[:200]) +
                  c(_DIM, "  (static results above are unaffected)"))
     L.append("")
 

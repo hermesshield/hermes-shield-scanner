@@ -435,16 +435,19 @@ def build_report(scan, repo_name: str, validated=None, root=None) -> str:
 
     disc = "\n".join(f"- **{cap}** — {n}" for cap, n in m["by_capability"].items()) or "- (none)"
     ai = m["ai_rows"]
-    ai_block = ("\n".join(
+    _ai_rows_md = "\n".join(
         f"- `{s.file_path}:{_sink_ln(s)}`  **{s.capability}**  _(model-proposed, AST-verified — VERIFY)_"
-        for s in ai[:40]) or "- (none — AI tier off or nothing found)")
-    # AI tier health: a broken agent backend is SHOWN, never silent — "(none)" must never masquerade as
-    # "the AI tier ran and found nothing" when the backend never launched.
-    _aic = m.get("ai_counts") or {}
-    _ai_fail = _aic.get("ai_failure") or _aic.get("ai_error")
-    if _ai_fail or _aic.get("ai_status") == "failed":
-        ai_block = (f"> **AI tier: FAILED — {_ai_fail or 'agent backend error'}.** No AI findings were "
-                    f"produced; the deterministic results above are unaffected.\n\n" + ai_block)
+        for s in ai[:40])
+    # AI tier health (BOTH tiers): a broken/refusing agent backend is SHOWN, never silent — the empty-state
+    # "(none — nothing found)" line must NEVER masquerade as "the AI tier ran and found nothing" when the
+    # backend actually FAILED. A genuine nothing-found (tier ran, zero surfaces) still reads as nothing-found.
+    _aih = IR.ai_tier_health(scan)
+    if _aih["any_failed"]:
+        _banner = (f"> **AI tier: FAILED — {_aih['failure_reason']}.** No AI findings were produced; "
+                   f"the deterministic results above are unaffected.")
+        ai_block = _banner if not _ai_rows_md else (_banner + "\n\n" + _ai_rows_md)
+    else:
+        ai_block = _ai_rows_md or "- (none — AI tier off or nothing found)"
 
     from datetime import date as _dt_date
     try:
@@ -1001,10 +1004,22 @@ def build_html(scan, repo_name: str, root=None, validated=None) -> str:
     # are model-proposed (any coding agent), AST-verified as real calls, and NEVER touch the banner, the
     # mapped total or any deterministic band. Rendered only when the AI tier produced surfaces.
     ai_live = m.get("ai_rows", [])
-    # Always rendered (mirrors the MD section 6), even when empty, so the HTML and MD stay at parity and the
-    # segregation is explicit. Advisory only — OUTSIDE the deterministic verdict/counts, never in any band.
-    _ai_body = (f"<table>{rows(ai_live)}</table>" if ai_live
-                else "<div class=tier>(none — AI tier off or nothing found)</div>")
+    # AI-tier health (BOTH tiers) — port of the MD FAILED-banner guard so THIS customer artefact (the one
+    # summary.py points the buyer to) never renders a refused/broken AI backend as "(none — nothing found)".
+    # A backend FAILURE shows a visible FAILED banner; a genuine nothing-found (tier ran, zero surfaces) still
+    # reads as nothing-found. Advisory only — OUTSIDE the deterministic verdict/counts, never in any band.
+    _aih = IR.ai_tier_health(scan)
+    if _aih["any_failed"]:
+        _ai_fail_banner = (
+            "<div class=tier style=\"border-left:3px solid #c0392b;padding-left:.7em\">"
+            "<b style=\"color:#c0392b\">AI tier: FAILED — " + esc(str(_aih["failure_reason"])) + ".</b> "
+            "No AI findings were produced; the deterministic results above are unaffected.</div>")
+        _ai_body = _ai_fail_banner + (f"<table>{rows(ai_live)}</table>" if ai_live else "")
+    else:
+        # Always rendered (mirrors the MD section 6), even when empty, so the HTML and MD stay at parity and
+        # the segregation is explicit.
+        _ai_body = (f"<table>{rows(ai_live)}</table>" if ai_live
+                    else "<div class=tier>(none — AI tier off or nothing found)</div>")
     ai_html = (
         "<h2 class=aiflag>▸ AI-suspected — advisory, verify "
         "<span class=c>— model-proposed, OUTSIDE the deterministic verdict &amp; counts</span></h2>"

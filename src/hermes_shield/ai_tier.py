@@ -106,6 +106,17 @@ def _safe_cache_path(cache_path: Path, allowed_base: Path = None):
         return None
 
 
+def _persist_cache(safe_cache: Path, cache: dict) -> None:
+    """Write the cache, creating its operator-owned parent dir FIRST (DEFECT 2). The FIRST --ai run into a
+    fresh scan output dir has no outputs/ yet, so the bare `write_text` raised `[Errno 2] No such file or
+    directory` and DISCARDED the AI findings for that run. `mkdir(parents=True, exist_ok=True)` makes the
+    first-run write succeed. Symlink-safety of `safe_cache` was already validated by `_safe_cache_path`
+    before this point, and we only ever create the operator-owned base (never a path under the untrusted
+    target root)."""
+    safe_cache.parent.mkdir(parents=True, exist_ok=True)
+    safe_cache.write_text(json.dumps(cache), encoding="utf-8")
+
+
 def _load_cache(cache_path: Path) -> dict:
     if cache_path is None:
         return {}
@@ -176,7 +187,7 @@ def apply(root: Path, surfaces, budget: int = 120, model=None, cache_path=None, 
             cache[key] = findings
             calls += 1
             if calls % 10 == 0 and safe_cache is not None:   # never write through a rejected/symlinked path
-                safe_cache.write_text(json.dumps(cache), encoding="utf-8")
+                _persist_cache(safe_cache, cache)            # DEFECT 2: makedirs(parent) before the write
         for f in findings:
             ln = int(f.get("line", 0) or 0)
             if any(abs(ln - sl) <= 2 for sl in static_lines.get(rel, ())):  # static already found this line
@@ -204,7 +215,7 @@ def apply(root: Path, surfaces, budget: int = 120, model=None, cache_path=None, 
     # Cache-only mode NEVER writes (a cache miss is a no-op) — this closes the arbitrary-write PoC where a
     # symlinked cache file was clobbered to `{}` even though no AI call was made.
     if calls > 0 and not cache_only and safe_cache is not None:
-        safe_cache.write_text(json.dumps(cache), encoding="utf-8")
+        _persist_cache(safe_cache, cache)                    # DEFECT 2: makedirs(parent) before the write
     out = {"ai_target_files": len(targets), "ai_calls": calls,
            "ai_surfaces_added": added, "ai_corroborated": corroborated, "ai_deduped_vs_static": deduped,
            "ai_budget": budget, "ai_model": model or "default",

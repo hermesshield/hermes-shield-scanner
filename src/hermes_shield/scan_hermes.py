@@ -435,6 +435,35 @@ def _b(v):
     return "yes" if v else "-"
 
 
+def _ai_tier_console_lines(scan) -> list:
+    """S7.4 / S8.95 FAIL-LOUD SURFACE — ONE console line per OPTIONAL AI tier that actually RAN, printed for
+    EVERY render mode (rich TTY, colour, AND non-TTY / piped / CI). Covers BOTH tiers: the whole-repo
+    `--ai-deep` finder (scan['ai_finder']) and the per-file `--ai` tier (scan['ai_tier_counts']).
+
+    A broken/refusing backend prints a `FAILED — <reason>` line so it is NEVER operator-indistinguishable
+    from "the tier ran and found nothing"; a genuine nothing-found prints an `ok` line. A tier that never
+    ran ({} bookkeeping) prints nothing, so the default (no AI flags) console stays byte-identical."""
+    lines = []
+    _af = scan.get("ai_finder") or {}
+    if _af:
+        if _af.get("ai_finder_status") == "failed":
+            lines.append(f"  AI finder: FAILED — {_af.get('ai_finder_error', 'unknown error')}")
+        else:
+            lines.append(f"  AI finder: {_af.get('ai_finder_model')} · "
+                         f"proposed {_af.get('ai_finder_proposed')} · "
+                         f"verified {_af.get('ai_finder_verified')} · "
+                         f"added {_af.get('ai_finder_added')}")
+    _at = scan.get("ai_tier_counts") or {}
+    if _at:
+        _at_fail = _at.get("ai_failure") or _at.get("ai_error")
+        if _at_fail or _at.get("ai_status") == "failed":
+            lines.append(f"  AI tier (--ai): FAILED — {_at_fail or 'agent backend error'}")
+        else:
+            lines.append(f"  AI tier (--ai): ok · calls {_at.get('ai_calls', 0)} · "
+                         f"surfaces added {_at.get('ai_surfaces_added', 0)}")
+    return lines
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Hermes Shield MVP-1A read-only self-scan")
     ap.add_argument("--scan", action="store_true")
@@ -651,15 +680,8 @@ def main(argv=None):
         # S7.4 FAIL-LOUD SURFACE: ONE console line whenever --ai-deep ran (ok OR failed) — printed for every
         # render mode so a broken/refusing AI backend is never operator-indistinguishable from "found
         # nothing". Absent by default (no --ai-deep => scan["ai_finder"] == {} => nothing printed).
-        _af = scan.get("ai_finder") or {}
-        if _af:
-            if _af.get("ai_finder_status") == "failed":
-                print(f"  AI finder: FAILED — {_af.get('ai_finder_error', 'unknown error')}")
-            else:
-                print(f"  AI finder: {_af.get('ai_finder_model')} · "
-                      f"proposed {_af.get('ai_finder_proposed')} · "
-                      f"verified {_af.get('ai_finder_verified')} · "
-                      f"added {_af.get('ai_finder_added')}")
+        for _line in _ai_tier_console_lines(scan):
+            print(_line)
     # --prove: a clear, honest separation of PROVEN-LIVE vs CANDIDATE vs refused-recipe. A refused finding
     # is STILL A REAL CANDIDATE (the lane declined to auto-execute it — non-drivable / non-Python / outside
     # the provable set), never "safe". Only printed when the lane actually ran (consent granted).

@@ -112,6 +112,66 @@ def _feed_enabled() -> bool:
         return False
 
 
+# --- REFUSAL / silent-zero guards (ported from ai_finder — the --ai-deep tier already had these; the
+# per-file --ai tier did not, so an exit-0 AUP content-refusal fell through _parse_json as [] -> the tier
+# reported ai_status="ok"/"(none - AI tier off or nothing found)" AND the empty non-result was CACHED under
+# the same key, replaying the phantom clean forever). A content-refusal ("safeguards flagged", AUP banner)
+# is returned by the claude CLI on STDOUT with EXIT CODE 0 — "backend refused" and "ran and found nothing"
+# are DIFFERENT truths, so we detect it and raise AIAgentError (a VISIBLE per-tier failure, never cached).
+_REFUSAL_MARKERS = (
+    "safeguards flagged",
+    "can't respond to this request",
+    "cannot respond to this request",
+    "usage policies",
+    "usage policy",
+    "https://www.anthropic.com/legal/aup",
+)
+
+
+def _json_array(raw: str):
+    """Return the parsed list iff a bracketed span of `raw` PARSES as a JSON array, else None. Single arbiter
+    of "did the backend actually emit a JSON array?" — distinguishes a real (possibly empty) result from a
+    refusal/prose that merely contains a stray bracket pair like `[x]` (which does not parse)."""
+    m = re.search(r"\[.*\]", raw, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _is_toplevel_json_array(raw: str):
+    """Return the parsed list iff `raw`, stripped, IS itself a JSON array — not merely a string that contains
+    a bracketed span. The stricter arbiter used ONLY by the nonzero-exit guard: a backend that failed
+    (exit != 0) is trusted as a genuine result only when its whole stdout is the array, so a JSON ERROR
+    PAYLOAD such as `{"type":"error","errors":[],"message":"overloaded"}` cannot masquerade as an empty
+    finding set via its embedded `[]`."""
+    s = raw.strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        return None
+    try:
+        data = json.loads(s)
+    except Exception:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _is_refusal(text: str) -> bool:
+    """True iff the backend returned a content-refusal (no parseable JSON array + a refusal signature). A
+    legitimate 'nothing found' reply (`[]` or terse prose without a signature) is NOT a refusal, and a
+    refusal that happens to contain a non-parsing `[x]` is still detected."""
+    if not text:
+        return False
+    arr = _json_array(text)
+    if arr is not None and (not arr or any(
+            isinstance(d, dict) and d.get("call") for d in arr)):
+        return False  # a parseable JSON array (empty, or real findings) — a result, not a refusal
+    low = text.lower()
+    return any(m in low for m in _REFUSAL_MARKERS)
+
+
 def claude_agent(model: str | None = None):
     """Built-in agent backend using the local claude CLI. Returns a propose(prompt, timeout)->raw callable.
 
@@ -151,10 +211,24 @@ def claude_agent(model: str | None = None):
             except Exception as e:
                 raise AIAgentError(f"claude CLI failed to launch: {e.__class__.__name__}: {e}")
             out, returncode, stderr = (proc.stdout or ""), proc.returncode, (proc.stderr or "")
-        if returncode != 0 and not (out or "").strip():
-            tail = (stderr or "").strip().splitlines()
+        # DEFECT 1 (nonzero-exit guard): a nonzero exit is a failure UNLESS stdout IS a top-level JSON array
+        # (a genuine findings array on a nonzero exit still returns). The old guard only raised on EMPTY
+        # stdout, so a nonzero exit carrying non-empty, non-JSON prose fell through _parse_json -> [] ->
+        # ai_status="ok" (a silent zero). The top-level-array check also stops a JSON error payload's embedded
+        # `[]` from masquerading as an empty finding set.
+        if returncode != 0 and _is_toplevel_json_array(out) is None:
+            tail = (stderr or out or "").strip().splitlines()
             detail = tail[-1][:160] if tail else "no output"
             raise AIAgentError(f"claude CLI exited {returncode}: {detail}")
+        # DEFECT 1 (exit-0 content refusal): an AUP safeguard refusal is returned on STDOUT with EXIT 0 and
+        # has no parseable JSON array — without this it falls through _parse_json as [] -> ai_status="ok" AND
+        # the empty non-result is CACHED, replaying the phantom clean forever. Raise so the tier records a
+        # VISIBLE FAILED and ai_tier.apply never writes the refusal to the cache.
+        if _is_refusal(out):
+            reason = out.strip().splitlines()[0][:160] if out.strip() else "no output"
+            raise AIAgentError(
+                f"claude CLI refused the security-scanner prompt "
+                f"(content-policy refusal, exit {returncode}): {reason}")
         return out
     return _propose
 
