@@ -20,3 +20,6 @@ shield-report/
 # keep the regression test tracked (its name matches *ai_cache* above)
 !tests/test_ai_cache_path_rejects_symlink.py
 .pytest_cache/
+
+# regenerable measurement artefacts
+tests/recall_corpus/scan_out_*/
