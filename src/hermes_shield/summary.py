@@ -223,18 +223,18 @@ def render_results(report: dict, scan: dict, out_dir, version: str, colour: bool
                  c(_DIM, "  (static results above are unaffected)"))
     L.append("")
 
-    # report location — relative path so it reads clean
-    try:
-        rel = os.path.relpath(str(out_dir), os.getcwd())
-    except Exception:
-        rel = str(out_dir)
-    md = os.path.join(rel, "hermes_shield_report.md")
-    html = os.path.join(rel, "shield_customer_report.html")
+    # report location — ABSOLUTE paths + a platform-correct open command. A relative path is unreliable: from
+    # a WSL shell `explorer.exe shield-report/…` cannot be resolved and silently opens Documents instead.
+    # open_report.open_command builds the copy-paste command from the absolute path (WSL -> wslpath-translated
+    # Windows path), so it always lands on the actual file.
+    from . import open_report as _OR
+    abs_md = os.path.abspath(os.path.join(str(out_dir), "hermes_shield_report.md"))
+    abs_html = _OR.report_abspath(out_dir)
     L.append("  " + c(_O, "▸ ") + c(_B, "Report written") + c(_GRY, " →"))
-    L.append("      " + c(_BLU, md))
-    L.append("      " + c(_BLU, html) + "   " + c(_GRN, "← open this for the full breakdown"))
+    L.append("      " + c(_BLU, abs_md))
+    L.append("      " + c(_BLU, abs_html) + "   " + c(_GRN, "← open this for the full breakdown"))
     L.append("")
-    _open_cmd, _open_note = _open_hint(html)
+    _open_cmd, _open_note = _OR.open_command(abs_html)
     L.append("      " + c(_DIM, "open it:  ") + c(_A, _open_cmd) + c(_DIM, _open_note))
     L.append("")
     return "\n".join(L)

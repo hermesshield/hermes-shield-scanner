@@ -577,15 +577,15 @@ def render_finale(report: dict, scan: dict, out_dir, version: str, stream=None):
       c(_GRY, "→ human-verify — advisory, never a verdict" if ai else "→ none (AI tier off or nothing found)")
       + "\n\n")
 
-    # ---- report path — orange, first ----
-    try:
-        rel = os.path.relpath(str(out_dir), os.getcwd())
-    except Exception:
-        rel = str(out_dir)
-    html = os.path.join(rel, "shield_customer_report.html")
-    md = os.path.join(rel, "hermes_shield_report.md")
-    w(f"  {c(_O, '▸ REPORT')} {c(_O + _B, html)}  {c(_GRN, '← open this')}\n")
-    w("      " + c(_DIM, md) + "\n\n")
+    # ---- report path — orange, first. ABSOLUTE path + a reliable, platform-correct open command (a relative
+    # path is unreliable: Windows Explorer can't resolve it from a WSL shell and opens Documents instead). ----
+    from . import open_report as _OR
+    abs_html = _OR.report_abspath(out_dir)
+    abs_md = os.path.abspath(os.path.join(str(out_dir), "hermes_shield_report.md"))
+    open_cmd, open_note = _OR.open_command(abs_html)
+    w(f"  {c(_O, '▸ REPORT')} {c(_O + _B, abs_html)}  {c(_GRN, '← open this')}\n")
+    w("      " + c(_DIM, abs_md) + "\n")
+    w("      " + c(_DIM, "open it:  ") + c(_A, open_cmd) + c(_DIM, open_note) + "\n\n")
 
     # ---- the honest Repairer hand-off ----
     w(f"  {c(_O, '▸ WHAT HAPPENS NEXT')}\n")

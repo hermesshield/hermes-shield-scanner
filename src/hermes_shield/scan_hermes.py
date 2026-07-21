@@ -518,7 +518,16 @@ def main(argv=None):
     _tiers = {"ai": os.getenv("HERMES_SHIELD_AI_TIER") == "1",
               "semgrep": os.getenv("HERMES_SHIELD_SEMGREP") == "1",
               "deps": os.getenv("HERMES_SHIELD_DEPS") == "1"}
-    live = getattr(args, "live", False)
+    # S9: the cinematic live HUD is now the DEFAULT for a human at a terminal — it renders whenever stdout is
+    # an interactive TTY (and the operator hasn't opted out). A MACHINE (piped / redirected / CI / non-TTY)
+    # still gets the byte-clean plain output, so JSON piping and every stdout-reading script keep working
+    # unchanged. `--quiet` forces plain even on a TTY; HERMES_SHIELD_NO_BANNER (the existing banner opt-out)
+    # also suppresses the auto-flip. `--live` is kept as an accepted NO-OP alias (it is now the default on a
+    # TTY): passing it never turns the HUD on OFF a TTY (the HUD/finale stay TTY-only), so the additive
+    # non-TTY contract is preserved byte-for-byte.
+    _stdout_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+    _flip_ok = _stdout_tty and not os.getenv("HERMES_SHIELD_NO_BANNER")
+    live = getattr(args, "live", False) or (not args.quiet and _flip_ok)
     # --quiet suppresses the stdout HUD; keep it consistent by suppressing the STDERR AI live feed too.
     if args.quiet:
         os.environ.setdefault("HERMES_SHIELD_AI_NO_STREAM", "1")
@@ -677,11 +686,27 @@ def main(argv=None):
                 _r = _IR.build_report(root, scan, validated)
                 print(f"  OWASP rating (proven-live): {_r['overall_rating']} · candidate-High: {_r['candidate_high']} · "
                       f"non-gated: {_r['non_gated_vulnerable']} · coverage: {_r['coverage_pct']}%")
+                # MACHINE-clean report pointer: the ABSOLUTE report path + a copy-paste open command (no auto-
+                # open off a TTY). Byte-clean text — no ANSI — so piped/CI stdout stays script-parseable.
+                from . import open_report as _OR
+                _abs = _OR.report_abspath(out_dir)
+                _cmd, _note = _OR.open_command(_abs)
+                print(f"  report: {_abs}")
+                print(f"  open:   {_cmd}{_note}")
         # S7.4 FAIL-LOUD SURFACE: ONE console line whenever --ai-deep ran (ok OR failed) — printed for every
         # render mode so a broken/refusing AI backend is never operator-indistinguishable from "found
         # nothing". Absent by default (no --ai-deep => scan["ai_finder"] == {} => nothing printed).
         for _line in _ai_tier_console_lines(scan):
             print(_line)
+        # AUTO-OPEN (interactive TTY only): fire-and-forget open of the HTML report in the OS default handler.
+        # HUMAN-on-a-terminal convenience; a MACHINE never triggers it (gated on stdout.isatty()). Errors are
+        # swallowed inside open_report.auto_open so a headless / no-DISPLAY box never crashes the scan. Opt-out:
+        # HERMES_SHIELD_NO_AUTO_OPEN (also used by the CLI to DEFER the single open until after the AI-pass
+        # offer resolves) or CI. Only when a report was actually written (scan/diff).
+        if ((args.scan or args.diff) and _stdout_tty and not os.getenv("HERMES_SHIELD_NO_AUTO_OPEN")
+                and not os.getenv("CI")):
+            from . import open_report as _OR
+            _OR.auto_open(_OR.report_abspath(out_dir))
     # --prove: a clear, honest separation of PROVEN-LIVE vs CANDIDATE vs refused-recipe. A refused finding
     # is STILL A REAL CANDIDATE (the lane declined to auto-execute it — non-drivable / non-Python / outside
     # the provable set), never "safe". Only printed when the lane actually ran (consent granted).

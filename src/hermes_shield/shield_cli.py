@@ -47,6 +47,40 @@ def _tool_available(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# WORKSTREAM C — offer the deeper AI pass after a STATIC-only scan. HUMAN-on-a-terminal ONLY: the prompt is
+# read from stdin, so it must NEVER fire in a non-TTY / piped / CI run (it would hang a script). Gated on
+# stdin.isatty() + the `claude` CLI present + not --quiet + the deep pass not already requested. The prompt
+# goes to STDERR so stdout stays script-clean.
+# ---------------------------------------------------------------------------
+
+def _should_offer_ai_pass(args, ai_deep_effective: bool) -> bool:
+    """True only when it is safe + sensible to OFFER the deeper AI pass interactively: a `scan` command that
+    ran STATIC-only (no --ai / --ai-deep), a human at the keyboard (stdin isatty), the `claude` CLI on PATH,
+    colourful output allowed (not --quiet), and no opt-out (HERMES_SHIELD_NO_PROMPT)."""
+    return (getattr(args, "command", None) == "scan"
+            and not ai_deep_effective
+            and not getattr(args, "ai", False)
+            and not getattr(args, "quiet", False)
+            and sys.stdin.isatty()
+            and _tool_available("claude")
+            and not os.getenv("HERMES_SHIELD_NO_PROMPT"))
+
+
+def _prompt_yes_no(question: str, stdin=None, stderr=None) -> bool:
+    """Write `question` to STDERR and read ONE line from stdin. Returns True only for y/yes (case-insensitive).
+    Empty line / N / EOF / any read error -> False. Only ever called on an interactive TTY."""
+    stdin = stdin if stdin is not None else sys.stdin
+    stderr = stderr if stderr is not None else sys.stderr
+    try:
+        stderr.write(question)
+        stderr.flush()
+        line = stdin.readline()
+    except (KeyboardInterrupt, OSError, EOFError):
+        return False
+    return (line or "").strip().lower() in ("y", "yes")
+
+
+# ---------------------------------------------------------------------------
 # No-arg target resolution ("detect & pick") — CLI-layer only. scan_hermes's own
 # current_repo_root() fallback is unchanged; the CLI resolves a target explicitly
 # so it can EXPLAIN the choice (and, on a TTY, offer a picker). All guidance goes
@@ -369,7 +403,35 @@ def main(argv=None):
     # finder fires whether shield_cli reaches the engine in-process (shared env) or, in future, via subprocess.
     if ai_deep:
         passthrough += ["--ai-deep"]
+
+    # WORKSTREAM C: when the scan will run STATIC-only but the deeper AI pass is available + we're interactive,
+    # we OFFER it after the scan. To keep exactly ONE auto-open across the (possible) two passes, DEFER the
+    # scan-engine's auto-open for the first (static) pass via HERMES_SHIELD_NO_AUTO_OPEN, then re-open once the
+    # offer resolves. (If the operator set that env themselves, we honour it end-to-end and never auto-open.)
+    will_offer = _should_offer_ai_pass(args, ai_deep)
+    user_opted_out_open = bool(os.getenv("HERMES_SHIELD_NO_AUTO_OPEN"))
+    if will_offer and not user_opted_out_open:
+        os.environ["HERMES_SHIELD_NO_AUTO_OPEN"] = "1"
+
     rc = scan_hermes.main(passthrough)
+
+    if will_offer:
+        say_yes = _prompt_yes_no("Run the deeper AI pass now? (uses your Claude) [y/N] ")
+        if not user_opted_out_open:
+            os.environ.pop("HERMES_SHIELD_NO_AUTO_OPEN", None)   # restore for the branch below / re-run
+        if say_yes:
+            # Run the whole-repo agentic AI finder (its live feed shows) and REGENERATE the report. The re-run
+            # auto-opens the freshly regenerated report (one open total).
+            os.environ["HERMES_SHIELD_AI_FINDER"] = "1"
+            rc = scan_hermes.main(passthrough + ["--ai-deep"])
+        elif not user_opted_out_open:
+            # Declined: open the static report we already generated (the single deferred auto-open), fire-and-
+            # forget, TTY-only, never in CI. Errors swallowed inside open_report.auto_open.
+            if sys.stdout.isatty() and not os.getenv("CI"):
+                from . import open_report as _OR
+                _out_dir, _ = scan_hermes.resolve_out_paths(Path(target).resolve() if target else None, args.out)
+                _OR.auto_open(_OR.report_abspath(_out_dir))
+
     if args.command in ("export-dashboard", "patch-plan") and not args.quiet:
         print("artefacts written under the scan output dir (default ./shield-report/outputs)")
     return rc
