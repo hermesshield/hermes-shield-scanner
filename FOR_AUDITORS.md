@@ -1,6 +1,6 @@
 # For Auditors — Hermes Shield Scanner
 
-*This document is for a security reviewer (e.g. a third-party assessment firm). It states what the tool is, how to reproduce a scan, what's in and out of scope, and its honest limits. British English.*
+*This document is for a security reviewer (an independent industry professional conducting a security review). It states what the tool is, how to reproduce a scan, what's in and out of scope, and its honest limits. British English.*
 
 ## 1. Safety — is it safe to run on real/untrusted repos?
 **Yes, for the deterministic core: it is READ-ONLY static analysis and does NOT execute any of the target repository's code.** The optional tiers have specific, documented behaviours (below) — read them before running `--ai`/`--deps`/`--prove` on an untrusted repo. **In particular, `--prove` (opt-in, consent-gated, off by default) DOES execute a benign canary against a candidate sink** — inside a network-denied, read-only, resource-capped bwrap sandbox — to confirm reachability; never run it on a repo you do not trust to execute.

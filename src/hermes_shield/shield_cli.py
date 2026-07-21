@@ -7,8 +7,8 @@ It never mutates the target repo and never takes a live action. Outputs are writ
 
 Usage:
   hermes-shield scan <repo>                  # deterministic core scan (default)
-  hermes-shield scan <repo> --ai             # + AI-assist tier (recall booster; needs `claude` CLI)
-  hermes-shield scan <repo> --ai-deep        # + whole-repo agentic AI finder (advisory; needs `claude` CLI)
+  hermes-shield scan <repo> --ai             # + per-file AI-assist recall (fast; needs `claude` CLI)
+  hermes-shield scan <repo> --ai-deep        # + whole-repo agentic AI finder (slower+deeper; needs `claude` CLI)
   hermes-shield scan <repo> --semgrep        # + semgrep comparator (multi-language breadth)
   hermes-shield scan                         # no target: enclosing git repo, or an interactive picker
   hermes-shield demo                         # scan a bundled deliberately-vulnerable toy agent (~10s)
@@ -22,10 +22,12 @@ Detection modes:
              Reproducible: same input -> same output.
   --semgrep  runs semgrep as an ISOLATED comparator tier (never merged into the core headline).
              Deterministic; needs `semgrep` installed. Env equivalent: HERMES_SHIELD_SEMGREP=1.
-  --ai       AI-assist tier: proposes NOVEL sinks the static rules missed; every proposal is
-             AST-verified and kept in a separate AI_SUSPECTED tier. NON-deterministic (uses an LLM
-             via your own local `claude` CLI auth — no key is stored in this package).
-             OFF by default. Env equivalent: HERMES_SHIELD_AI_TIER=1.
+  --ai       AI-assist tier: fast, per-FILE recall of NOVEL sinks the static rules missed; every
+             proposal is AST-verified and kept in a separate AI_SUSPECTED tier. NON-deterministic
+             (uses your own local `claude` CLI auth — sends code to Anthropic under YOUR account;
+             no key is stored in this package). OFF by default. Env equivalent: HERMES_SHIELD_AI_TIER=1.
+  --ai-deep  whole-REPO agentic AI finder — slower + deeper than --ai (reads across the repo); the
+             same pass offered by the interactive post-scan prompt. Advisory; OFF by default.
 
 For reproducible / audit runs use core (optionally + --semgrep). --ai improves hit-rate but is
 non-deterministic; its findings are advisory and never counted in the deterministic headline.
@@ -251,8 +253,9 @@ def main(argv=None):
         sp.add_argument("--out", default=None,
                         help="output dir for scan artefacts (default: ./shield-report/ in the CWD)")
         sp.add_argument("--ai", action="store_true",
-                        help="enable the AI-assist tier (novel-sink recall booster; advisory, "
-                             "non-deterministic, needs the `claude` CLI; OFF by default)")
+                        help="AI-assist: fast, per-FILE novel-sink recall (uses your local `claude`, sends "
+                             "code to Anthropic under YOUR account). Advisory, non-deterministic; OFF by "
+                             "default. For the whole-repo, slower + deeper pass see --ai-deep.")
         sp.add_argument("--ai-backend", dest="ai_backend", choices=("claude", "ollama"), default=None,
                         help="AI-assist backend transport (default: claude, the historical path). "
                              "'ollama' runs a LOCAL, zero-egress model via localhost Ollama "
@@ -284,15 +287,15 @@ def main(argv=None):
             # and appended as ADVISORY ai_suspected surfaces, never in the deterministic headline. OFF by
             # default => byte-identical scan. Degrades gracefully if `claude` is absent (like --ai).
             sp.add_argument("--ai-deep", dest="ai_deep", action="store_true",
-                            help="enable the whole-repo agentic AI finder (advisory ai_suspected surfaces; "
-                                 "reads across the repo; non-deterministic; Claude-only for now — needs the "
-                                 "`claude` CLI, and --ai-backend does NOT apply to it; OFF by default). "
+                            help="whole-REPO agentic AI finder — slower + deeper than --ai; same as accepting "
+                                 "the post-scan prompt. Advisory ai_suspected surfaces; reads across the repo; "
+                                 "non-deterministic; Claude-only for now — needs the `claude` CLI, and "
+                                 "--ai-backend does NOT apply to it; OFF by default. "
                                  "Env equivalent: HERMES_SHIELD_AI_FINDER=1.")
         sp.add_argument("--live", action="store_true",
-                        help="opt-in cinematic live scan: a sticky HUD (climbing action-surface map + honest "
-                             "signal tally) while scanning, then the on-screen 'collapse' narrowing to the "
-                             "RED/AMBER/BLUE verdict. Additive — without --live the output is unchanged. On a "
-                             "non-TTY/piped run the HUD is skipped and stdout stays clean (JSON-safe).")
+                        help="the live HUD is now the DEFAULT on a terminal; --live is kept as a no-op alias. "
+                             "Use --quiet for plain output. (The HUD stays TTY-only: a non-TTY/piped run always "
+                             "gets byte-clean, JSON-safe stdout, whether or not --live is passed.)")
         sp.add_argument("--quiet", action="store_true")
     dp = sub.add_parser("demo",
                         help="scan a bundled, deliberately vulnerable toy agent — a real red "
@@ -308,9 +311,9 @@ def main(argv=None):
     dp.add_argument("--yes-execute-my-code", dest="yes_execute", action="store_true",
                     help="non-interactive consent for --prove (also: HERMES_SHIELD_PROVE_CONSENT=1)")
     dp.add_argument("--live", action="store_true",
-                    help="opt-in cinematic live scan of the bundled toy agent — a real, honest RED showcase "
-                         "(sticky HUD, the on-screen collapse, then the verdict). Additive; default demo "
-                         "output is unchanged.")
+                    help="the live HUD is now the DEFAULT on a terminal; --live is kept as a no-op alias. "
+                         "Use --quiet for plain output. (The HUD stays TTY-only; a non-TTY/piped run is "
+                         "unchanged whether or not --live is passed.)")
     dp.add_argument("--quiet", action="store_true")
     sub.add_parser("version")
     args = ap.parse_args(argv)
@@ -416,7 +419,7 @@ def main(argv=None):
     rc = scan_hermes.main(passthrough)
 
     if will_offer:
-        say_yes = _prompt_yes_no("Run the deeper AI pass now? (uses your Claude) [y/N] ")
+        say_yes = _prompt_yes_no("Run the deeper AI pass (--ai-deep) now? (uses your Claude) [y/N] ")
         if not user_opted_out_open:
             os.environ.pop("HERMES_SHIELD_NO_AUTO_OPEN", None)   # restore for the branch below / re-run
         if say_yes:

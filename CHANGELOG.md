@@ -3,13 +3,14 @@
 All notable changes to the Hermes Shield scanner are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
-## [0.8.0] — 2026-07-18  ·  actions-firewall + dedup-worst-band hardening (intentional core verdict change)
+## [0.8.0] — 2026-07-18 · PENDING RELEASE (not yet tagged; not on PyPI — 0.7.1 is the current public release) · actions-firewall + dedup-worst-band hardening (intentional core verdict change)
 
 **MINOR bump (SemVer): this is a deliberate core verdict-behaviour change — output is intentionally NOT
 byte-identical to 0.7.x.** Two hardenings: (1) reachable, unguarded **agent-action sinks** (payment /
 message-send / post / …) now drive a RED or AMBER verdict instead of a false BLUE "no live threat proven";
 (2) dedup now folds each partition to its **worst-banded** member so a benign sibling can no longer hide a
-dangerous one. Re-validation of this core against the independent assessment (last of v0.3.7) is pending.
+dangerous one. The reviewed builds were v0.1.0 / v0.3.7; re-validation of the current core against the
+independent security review (last of v0.3.7) is pending.
 
 ### Changed — VERDICT BEHAVIOUR (intentional core change; output is deliberately NOT byte-identical)
 - **Closed the actions-firewall gap.** `guard_attribution` stamps `UNGUARDED_CRITICAL_LIVE_SINK` onto **any**
@@ -124,7 +125,7 @@ dangerous one. Re-validation of this core against the independent assessment (la
 ## [0.7.1] — 2026-07-17  ·  FIRST PUBLIC RELEASE (launch-hardening)
 
 ### Changed / Fixed (from an adversarial launch review — no scan-engine change)
-- **Auditor name genericised** across all docs, source and tests (an unnamed third-party assessment). The
+- **Reviewer name genericised** across all docs, source and tests (an independent security review by an unnamed industry professional). The
   deterministic core is byte-identical; only comments/docs changed.
 - **`--prove` isolation is now structural.** The lane **refuses to run without a real bubblewrap sandbox** —
   the rlimit-only fallback never executes target code (previously the fallback was reachable via the module
@@ -248,9 +249,9 @@ dangerous one. Re-validation of this core against the independent assessment (la
 ### Tests
 - **+37 tests** (launch-hardening, CLI ergonomics, demo/licence/metadata). Suite: **347 passed**.
 
-## [0.4.0] — 2026-07-16  ·  SECURITY (third-party re-assessment remediation)
+## [0.4.0] — 2026-07-16  ·  SECURITY (independent security review — re-review remediation)
 
-### Fixed — all 4 findings from the third-party re-assessment (of v0.3.7), each verified closed against the live code
+### Fixed — all 4 findings from the independent security review's re-review (of v0.3.7), each verified closed against the live code
 - **[MED] `--deps` target metadata could widen fetch scope (HS-01).** A scanned repo's own
   `.hermes-shield.json` allowlist (`first_party_packages` / `first_party_prefixes`) is now **advisory-only**
   and cannot cause a package to be fetched unless the **operator** trusts it from OUTSIDE the target
@@ -280,9 +281,9 @@ dangerous one. Re-validation of this core against the independent assessment (la
   deterministic core, its numbers, and all outputs are **byte-identical** — every change is confined to the
   optional `--deps` / `--ai` / `--semgrep` tiers.
 
-## [0.3.7] — 2026-07-13  ·  SECURITY (third-party assessment remediation)
+## [0.3.7] — 2026-07-13  ·  SECURITY (independent security review remediation)
 
-### Fixed — all 3 findings from the third-party security assessment (v0.1.0), verified closed with adversarial PoCs
+### Fixed — all 3 findings from the independent security review (v0.1.0), verified closed with adversarial PoCs
 - **[HIGH] AI-tier arbitrary-write via target-controlled cache symlink (CWE-59).** The `--ai` cache now lives
   under the **operator output directory**, never under the scanned target; it refuses to write through a
   symlink or any path escaping the operator root; cache-only with no cache file performs **no write and no
@@ -345,7 +346,7 @@ dangerous one. Re-validation of this core against the independent assessment (la
 ## [0.3.3] — 2026-07-10
 
 ### Changed
-- **Messaging rewritten to a security-firm voice** across the CLI banner and the HTML report. Removed the
+- **Messaging rewritten to a professional security-vendor voice** across the CLI banner and the HTML report. Removed the
   defensive lines ("honest by rule", "we never run your private code") — replaced with capability/architecture
   statements: *excessive-agency scanner for AI-agent code · static analysis · runs fully local ·
   reachability-rated · no network egress*. The report subtitle, meta-line, "how to read this" note and footer
@@ -435,4 +436,4 @@ dangerous one. Re-validation of this core against the independent assessment (la
   TS/JS + C# sinks-only), optional `--semgrep` comparator, optional `--ai` recall tier, `--all`.
 - Two-tier risk model (reachable-in-repo vs install-liability), OWASP severity×likelihood rating.
 - Auditor pack: `ARCHITECTURE.md`, `FOR_AUDITORS.md`, sample vulnerable-agent scan.
-- **Submitted for independent third-party security assessment (2026-07-09).**
+- **Submitted for an independent security review by an industry professional (2026-07-09).**
