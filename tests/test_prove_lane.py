@@ -334,12 +334,20 @@ def test_eval_expr_param_is_proven_regardless_of_name(tmp_path):
     assert r["negative_control"]["clean"] is True
 
 
-def test_constant_code_arg_is_refused_not_proven(tmp_path):
-    # a compile-time-constant code argument is NOT an injection point -> refused, never promoted (kills the FP).
-    r = _prove_file(tmp_path, "c.py", "def run(x):\n    return __import__('re')\n")
-    assert r["capability"] == "code_exec"
-    assert r["verdict"] == "refused-recipe" and r["promoted"] is False
-    assert "constant" in r["reason"]
+def test_constant_code_arg_is_not_a_promotable_surface(tmp_path):
+    # v0.8.1 PRECISION: a compile-time-constant code/module target (`__import__('re')`) is a STATIC import,
+    # not a dynamic code-exec injection point. It is now removed at DETECTION (ast_sinks constant-target
+    # guard), so it never becomes a code_exec surface and can NEVER be promoted to proven-live — a strictly
+    # stronger guarantee than the prior refuse-at-prove. (The prove lane's own constant-refusal remains for
+    # sinks that DO still surface, e.g. the constant SHELL command in test_constant_shell_command_refused.)
+    target = tmp_path / "repo"
+    target.mkdir(exist_ok=True)
+    (target / "c.py").write_text("def run(x):\n    return __import__('re')\n")
+    scan = scan_hermes.run_scan(target)
+    code_exec = [s for s in scan["surfaces"] if s.file_path == "c.py" and s.capability == "code_exec"]
+    assert not code_exec, "constant-literal __import__ must not be a code_exec surface (removed at detection)"
+    _validated, records = prove.run_lane(target, scan)
+    assert not [r for r in records if r["file"] == "c.py"], "constant code target must never reach the prove lane"
 
 
 def test_driver_fills_other_required_params(tmp_path):

@@ -11,6 +11,7 @@ repo_scanner to build ActionSurface records.
 """
 from __future__ import annotations
 import ast
+import re
 from typing import List, Optional
 
 # bare method/function name -> (capability, mutating)
@@ -252,6 +253,19 @@ def _collect_aliases(tree):
                 if a.asname:
                     mod_alias[a.asname] = a.name
     return sym_alias, mod_alias
+
+
+def _collect_str_consts(tree):
+    """v0.8.1. Module-level `NAME = "<str literal>"` bindings (single-Name target, value a BARE str
+    Constant). Lets `page.evaluate(NAME, data)` recognise a FIXED module-level JS body as constant.
+    LITERAL-ONLY: an f-string / concatenation / call value is deliberately NOT collected, so an
+    interpolated (potentially untrusted) JS body is never mistaken for a constant and stays a sink."""
+    out = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
+                and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
+            out[n.targets[0].id] = n.value.value
+    return out
 
 
 def _chain_root(node):
@@ -533,14 +547,26 @@ _BENIGN_RESIDUE_VERBS = (_HARD_BENIGN_NAMES | _TELEMETRY_BENIGN_NAMES | _STATUS_
                          | _BENIGN_SPAN_NAMES)
 
 
+def _const_str_code_target(node: ast.Call) -> bool:
+    """v0.8.1 PRECISION. True iff the CODE/MODULE target (first positional arg) of an
+    eval/exec/compile/__import__/import_module call is a CONSTANT STRING LITERAL — the provably-static,
+    non-injectable form (`eval("1+1")`, `__import__("re")`, `compile("<lit>", ...)`). Anything else — a
+    Name, f-string (JoinedStr), concatenation, subscript, call, or a MISSING arg — is NON-constant and
+    MUST stay a dynamic code-exec sink. Mirrors the constant-arg test the codebase already applies to
+    importlib.import_module / page.evaluate: only the developer-authored literal is inert."""
+    a0 = node.args[0] if node.args else None
+    return isinstance(a0, ast.Constant) and isinstance(a0.value, str)
+
+
 def _classify_call(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None,
-                   alias_sinks=None, danger_vars=None, self_attrs=None):
+                   alias_sinks=None, danger_vars=None, self_attrs=None, str_consts=None):
     """Classify a call, then apply the PRECISION ALLOWLIST as the LAST step (CORRECT DESIGN): the specific sink
     matchers run FIRST and WIN, and benign suppression fires ONLY when they landed on the WEAK GENERIC bucket
     (tool_invoke / unknown_action) AND the method name is itself benign (logging/serialisation/telemetry/self-
     status). It can NEVER suppress a call that resolves to a specific dangerous capability, even when the
     receiver is deceptively named `logger`/`metrics`/`tracer` (the FN-2 evasion the old allowlist enabled)."""
-    res = _classify_call_impl(node, sym_alias, mod_alias, inst_map, alias_sinks, danger_vars, self_attrs)
+    res = _classify_call_impl(node, sym_alias, mod_alias, inst_map, alias_sinks, danger_vars, self_attrs,
+                              str_consts)
     if res is None:
         return None
     if res[0] in _GENERIC_RESIDUE_CAPS:
@@ -552,7 +578,7 @@ def _classify_call(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None
 
 
 def _classify_call_impl(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None,
-                        alias_sinks=None, danger_vars=None, self_attrs=None):
+                        alias_sinks=None, danger_vars=None, self_attrs=None, str_consts=None):
     """Return (capability, mutating, sink_kind, static_artifact_type) or None if not a sink."""
     func = node.func
     bare = _attr_name(func)
@@ -587,7 +613,11 @@ def _classify_call_impl(node: ast.Call, sym_alias=None, mod_alias=None, inst_map
     # `_sender = api.send_direct_message`). No literal sink token at the call site; resolved via binding.
     if isinstance(func, ast.Name) and (alias_sinks or {}).get(func.id):
         cap, mut = alias_sinks[func.id]
-        return cap, mut, "ast_alias_call", None
+        # v0.8.1: a name bound to a builtin code-exec (`_imp = __import__; _imp("re")`) is inert only when
+        # its target is a constant literal — the SAME provably-static test as the direct builtin branch.
+        # A non-constant target (`_imp(user)`) stays RED.
+        if not (cap == "code_exec" and _const_str_code_target(node)):
+            return cap, mut, "ast_alias_call", None
     # S9 DET-RECALL: a call through a local bound to `getattr(<known-dangerous receiver>, <attr>)` —
     # attacker/config-selected attribute of os/subprocess/a danger-lib (`fn = getattr(os, verb); fn(x)`,
     # `creator = getattr(resource, 'create'); creator(...)`). Undecidable which verb -> honest dynamic_dispatch.
@@ -609,9 +639,16 @@ def _classify_call_impl(node: ast.Call, sym_alias=None, mod_alias=None, inst_map
     if bare in _MODEL_CALL_NAMES:
         return "model_call", False, "ast_call", None
 
-    # code execution (BUILTINS — Name calls only, so df.eval / re.compile attr-calls don't false-fire)
+    # code execution (BUILTINS — Name calls only, so df.eval / re.compile attr-calls don't false-fire).
+    # v0.8.1 PRECISION: a CONSTANT STRING code/module target (`eval("1+1")`, `__import__("re")`,
+    # `compile("<lit>", ...)`) is developer-authored & not attacker-injectable — the STATIC form, exactly
+    # what the codebase already excludes for importlib.import_module (below) and page.evaluate. A
+    # NON-constant target (Name / f-string / expression / subscript / missing arg) is the dynamic,
+    # injection-prone form and MUST stay RED (`eval(request.json["x"])`, `__import__(user_var)`).
     if isinstance(func, ast.Name) and func.id in ("eval", "exec", "compile", "__import__"):
-        return "code_exec", True, "ast_call", None
+        if not _const_str_code_target(node):
+            return "code_exec", True, "ast_call", None
+        # constant-literal target -> provably static, not dynamic code-exec; fall through (not a sink)
     # deserialisation RCE (dotted, distinctive)
     if dotted in _DESERIALIZE:
         return "deserialize", True, "ast_call", None
@@ -735,9 +772,18 @@ def _classify_call_impl(node: ast.Call, sym_alias=None, mod_alias=None, inst_map
         # body with an untrusted ARGUMENT is not code injection. Fire only when the code STRING is non-constant
         # (interpolated), or when a constant body itself evals its arg. This never touches eval()/exec().
         code_arg = node.args[0] if node.args else None
-        _const_safe = (isinstance(code_arg, ast.Constant) and isinstance(code_arg.value, str)
-                       and not any(t in code_arg.value for t in ("eval(", "new Function", "Function(",
-                                                                  "setTimeout(", "setInterval(", "import(")))
+        # v0.8.1: resolve a Name bound to a module-level STRING CONSTANT (`page.evaluate(_HARVEST_JS, data)`).
+        # Playwright serialises arg2 as DATA, not code, so a FIXED JS body is not injectable. `str_consts`
+        # holds LITERAL-only bindings, so a Name bound to an f-string / concatenation is NOT resolved here and
+        # an interpolated JS body stays a dynamic code-exec sink.
+        _js = None
+        if isinstance(code_arg, ast.Constant) and isinstance(code_arg.value, str):
+            _js = code_arg.value
+        elif isinstance(code_arg, ast.Name):
+            _js = (str_consts or {}).get(code_arg.id)
+        _const_safe = (_js is not None
+                       and not any(t in _js for t in ("eval(", "new Function", "Function(",
+                                                      "setTimeout(", "setInterval(", "import(")))
         if code_arg is not None and not _const_safe:
             return "code_exec", True, "ast_call", None
         # constant/absent JS body -> not a code_exec surface; fall through
@@ -986,6 +1032,40 @@ def _dest_node(node: ast.Call, cap: str, assigns=None):
     return None
 
 
+# v0.8.1 FP3-host: a scheme://HOST authority TERMINATED by a constant '/', '?' or '#' delimiter. Requiring
+# the delimiter is what makes it SOUND: without a constant terminator an interpolation could SET or EXTEND
+# the host (`f"https://evil.co{x}"` -> `evil.corp.attacker.com/...`), so only a host closed by a constant
+# delimiter is provably fixed. Host chars are anything up to the authority terminator (so `user:pass@h:443`
+# is fine); the scheme is a normal URL scheme.
+_URL_CONST_HOST = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/?#\s]+[/?#]")
+
+
+def _leading_str_const(node):
+    """Leading STRING-CONSTANT text of a URL expression, if it BEGINS with a literal: a JoinedStr's first
+    value (iff a str Constant), the leftmost operand of a '+'-concatenation, or a bare str Constant. None
+    when the expression begins with a Name / call / interpolation — a NON-constant host that stays 'unknown'."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        if node.values and isinstance(node.values[0], ast.Constant) and isinstance(node.values[0].value, str):
+            return node.values[0].value
+        return None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _leading_str_const(node.left)
+    return None
+
+
+def _has_const_host(node) -> bool:
+    """v0.8.1 FP3-host. True iff a URL expression's scheme://HOST authority is FULLY inside a leading string
+    constant, terminated by a constant '/', '?' or '#'. An interpolated token/secret/path AFTER the host
+    (`f"https://api.telegram.org/bot{tok}/sendMessage"`) does NOT make the DESTINATION attacker-controlled —
+    the host is fixed. A host that is itself interpolated (`f"{base}/x"`, `f"https://{host}/x"`) or not
+    closed by a constant delimiter (`f"https://evil.co{x}"`) returns False and stays RED. Taint reaching the
+    destination arg is handled SEPARATELY by the tainted_destination bit — this only classifies provenance."""
+    lead = _leading_str_const(node)
+    return bool(lead and _URL_CONST_HOST.search(lead))
+
+
 def _classify_dest(node, assigns=None) -> str:
     """Provenance of a destination node: 'constant' | 'config' (operator/env/settings) | 'unknown'.
     Follows one level of a simple local assignment (`chat = os.getenv(...)`) via `assigns`. A tainted
@@ -1014,6 +1094,8 @@ def _classify_dest(node, assigns=None) -> str:
     if isinstance(node, ast.Attribute) and (node.attr.endswith("_url") or node.attr.endswith("_URL")
                                             or node.attr in ("endpoint", "webhook_url")):
         return "config"
+    if _has_const_host(node):                              # f"https://api.host.com/..{token}" — fixed HOST
+        return "constant"
     return "unknown"                                       # bare unknown variable stays HIGH
 
 
@@ -1075,7 +1157,8 @@ def analyse_destinations(tree, dest_caps: dict, cli_main: bool = False) -> dict:
 
 class _Visitor(ast.NodeVisitor):
     def __init__(self, sym_alias=None, mod_alias=None, inst_map=None,
-                 module_alias=None, func_alias=None, module_danger=None, func_danger=None, self_attrs=None):
+                 module_alias=None, func_alias=None, module_danger=None, func_danger=None, self_attrs=None,
+                 str_consts=None):
         self.stack: List[str] = []       # enclosing symbols
         self.auth_stack: List[bool] = []  # FP4: enclosing auth-gated routes
         self.sinks: List[dict] = []
@@ -1083,6 +1166,7 @@ class _Visitor(ast.NodeVisitor):
         self.mod_alias = mod_alias or {}
         self.inst_map = inst_map or {}
         self.self_attrs = self_attrs or {}
+        self.str_consts = str_consts or {}
         # S9 DET-RECALL: scope-local binding maps. The stack top is the effective (module + enclosing
         # functions) map at the current point; entering a function merges its locals, leaving pops them.
         self._func_alias = func_alias or {}
@@ -1127,7 +1211,8 @@ class _Visitor(ast.NodeVisitor):
 
     def visit_Call(self, node):
         res = _classify_call(node, self.sym_alias, self.mod_alias, self.inst_map,
-                             self._alias_stack[-1], self._danger_stack[-1], self.self_attrs)
+                             self._alias_stack[-1], self._danger_stack[-1], self.self_attrs,
+                             self.str_consts)
         if res:
             cap, mut, kind, artifact = res
             self.sinks.append({
@@ -1279,8 +1364,9 @@ def detect(text: str):
     self_attrs = _collect_self_danger_attrs(tree, sym_alias, mod_alias, inst_map)
     module_alias, func_alias = _collect_call_aliases(tree, sym_alias, mod_alias)
     module_danger, func_danger = _collect_danger_dispatch_vars(tree, mod_alias, inst_map, self_attrs)
+    str_consts = _collect_str_consts(tree)
     v = _Visitor(sym_alias, mod_alias, inst_map, module_alias, func_alias,
-                 module_danger, func_danger, self_attrs)
+                 module_danger, func_danger, self_attrs, str_consts)
     v.visit(tree)
     dead = _dead_line_ranges(tree)
     if dead:
