@@ -516,6 +516,7 @@ def main(argv=None):
     # S8.91/S8.92: branded banner + live progress. Cosmetic only (suppressed by --quiet / NO_COLOR /
     # HERMES_SHIELD_NO_BANNER; a spinner only animates on a TTY) — they never affect the scan or its numbers.
     _tiers = {"ai": os.getenv("HERMES_SHIELD_AI_TIER") == "1",
+              "ai_backend": (os.getenv("HERMES_SHIELD_AI_BACKEND") or "claude").strip().lower(),
               "semgrep": os.getenv("HERMES_SHIELD_SEMGREP") == "1",
               "deps": os.getenv("HERMES_SHIELD_DEPS") == "1"}
     # S9: the cinematic live HUD is now the DEFAULT for a human at a terminal — it renders whenever stdout is

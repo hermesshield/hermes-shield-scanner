@@ -29,6 +29,21 @@ _RESET = "\033[0m"
 _BRIGHT_CHARS = set("█▀▄▐▌")
 _DIM_CHARS = set("░▒▓╗╝╚╔═║")
 
+# --ai destination, per selected backend — the honest network-disclosure string. A cloud backend is REAL
+# egress under the user's own key, so we must name where the code actually goes (never hard-code "claude").
+_AI_DEST = {
+    "claude":    "your local claude CLI (Anthropic, under your account)",
+    "ollama":    "a local Ollama model (localhost, zero-egress)",
+    "anthropic": "Anthropic's API (api.anthropic.com, under your key)",
+    "openai":    "OpenAI's API (api.openai.com, under your key)",
+    "venice":    "Venice's API (api.venice.ai, under your key)",
+    "gemini":    "Google's Gemini API (under your key)",
+}
+
+
+def _ai_dest(backend: str | None) -> str:
+    return _AI_DEST.get((backend or "claude").strip().lower(), f"the '{backend}' backend")
+
 
 def _use_colour(stream) -> bool:
     if os.getenv("NO_COLOR"):
@@ -76,14 +91,15 @@ def render(version: str, tiers: dict | None = None, target: str | None = None, c
     L.append(f"  {O}│{R} {A}maps + proves what a hijacked agent can do {G}·{A} static + AI-assisted{R}")
     # Honesty (audit #4): the deterministic CORE scan reaches no network and no source leaves the machine.
     # Optional tiers change that and must NOT be covered by the clean claim: --deps fetches the repo's own
-    # pinned packages; --ai forwards selected in-root code TEXT to your local `claude` CLI (which may in turn
-    # use its configured provider). State whichever is active truthfully instead of the absolute claim.
+    # pinned packages; --ai forwards selected in-root code TEXT to the SELECTED backend's destination (which
+    # varies — local CLI, localhost model, or a cloud API under the user's own key). Name the ACTUAL
+    # destination of the active backend instead of hard-coding "claude" — a cloud backend is real egress.
     if tiers.get("ai") or tiers.get("deps"):
         parts = []
         if tiers.get("deps"):
             parts.append("--deps fetches your pinned packages")
         if tiers.get("ai"):
-            parts.append("--ai forwards selected in-root code to your local claude CLI")
+            parts.append("--ai forwards selected in-root code to " + _ai_dest(tiers.get("ai_backend")))
         L.append(f"  {O}│{R} {A}network: " + f"{G} · {A}".join(parts) + f"{R}")
     else:
         L.append(f"  {O}│{R} {A}no network egress {G}·{A} source never leaves this machine{R}")

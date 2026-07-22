@@ -143,7 +143,7 @@ A first scan needs none of these. `demo` takes only `--out`/`--live`/`--quiet`/`
 | `--live` | scan · diff · export-dashboard · patch-plan · demo | No-op alias — the live HUD is already the terminal default. A non-TTY/piped run is always byte-clean, JSON-safe. |
 | `--quiet` | scan · diff · export-dashboard · patch-plan · demo | Plain, JSON-safe stdout, no HUD — **the CI / agent / piping mode**. |
 | `--ai` | scan · diff · export-dashboard · patch-plan | Per-file AI-assist recall via your own local `claude` CLI (**sends code to Anthropic under _your_ account; no key stored in the package**). Advisory, non-deterministic, **never in the deterministic headline**. OFF by default. |
-| `--ai-backend {claude,ollama}` | with `--ai` | AI transport (default `claude`). `ollama` = a **local, zero-egress** model via localhost Ollama (`HERMES_SHIELD_OLLAMA_HOST` / `_MODEL`). Only meaningful with `--ai`; does **not** apply to `--ai-deep`. |
+| `--ai-backend {claude,ollama,anthropic,openai,venice,gemini}` | with `--ai` | AI transport (default `claude`). `ollama` = **local, zero-egress**; `anthropic`/`openai`/`venice`/`gemini` send the **secret-redacted** file source to that cloud provider **under your own key** (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `VENICE_API_KEY` / `GEMINI_API_KEY` — required, never stored; a missing key **fails loud**). Only meaningful with `--ai`; does **not** apply to `--ai-deep`. |
 | `--ai-deep` | scan | Whole-repo agentic AI finder — slower + deeper than `--ai`; the same pass the post-scan prompt offers. Advisory; **Claude-only for now**; OFF by default. Env: `HERMES_SHIELD_AI_FINDER=1`. |
 | `--semgrep` | scan · diff · export-dashboard · patch-plan | Semgrep comparator tier (~30-language breadth; deterministic; needs `semgrep` installed). Attributed separately, **never merged into the headline**. |
 | `--deps` | scan · diff · export-dashboard · patch-plan | Also fetch + scan the repo's **own pinned first-party** packages (wheels only — **never installed, never executed**; **reaches the network**). Not in `--all`. OFF by default. |
@@ -180,9 +180,10 @@ process). For CI gating, parse the verdict from the report JSON
 ```text
 $ hermes-shield scan --help
 usage: hermes-shield scan [-h] [--out OUT] [--ai]
-                          [--ai-backend {claude,ollama}] [--semgrep] [--all]
-                          [--deps] [--prove] [--yes-execute-my-code]
-                          [--ai-deep] [--live] [--quiet]
+                          [--ai-backend {claude,ollama,anthropic,openai,venice,gemini}]
+                          [--semgrep] [--all] [--deps] [--prove]
+                          [--yes-execute-my-code] [--ai-deep] [--live]
+                          [--quiet]
                           [target]
 
 positional arguments:
@@ -198,12 +199,18 @@ options:
                         account). Advisory, non-deterministic; OFF by default.
                         For the whole-repo, slower + deeper pass see --ai-
                         deep.
-  --ai-backend {claude,ollama}
+  --ai-backend {claude,ollama,anthropic,openai,venice,gemini}
                         AI-assist backend transport (default: claude, the
                         historical path). 'ollama' runs a LOCAL, zero-egress
                         model via localhost Ollama (HERMES_SHIELD_OLLAMA_HOST
-                        / HERMES_SHIELD_OLLAMA_MODEL). Only meaningful with
-                        --ai; absent => claude (byte-identical to today).
+                        / HERMES_SHIELD_OLLAMA_MODEL).
+                        'anthropic'/'openai'/'venice'/'gemini' send the
+                        SECRET-REDACTED file source to that cloud provider
+                        under YOUR OWN key (ANTHROPIC_API_KEY / OPENAI_API_KEY
+                        / VENICE_API_KEY / GEMINI_API_KEY — required, never
+                        stored; a missing key fails loud). Only meaningful
+                        with --ai (NOT --ai-deep, which stays Claude-only);
+                        absent => claude (byte-identical to today).
   --semgrep             enable the semgrep comparator tier (multi-language
                         breadth; deterministic; needs `semgrep` installed)
   --all                 full coverage: run the core + --semgrep + --ai in one
