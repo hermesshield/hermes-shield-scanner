@@ -4,6 +4,11 @@
 stars · 8,447 action surfaces mapped · 596 reachable-in-repo · 542 install-liability (reachability we
 can't rule out).**
 
+> **v0.8.1 re-run (2026-07-22):** 8,438 / 596 / 533 — **within 0.1%** of the v0.8.0 record; **NOT re-stamped.**
+> The v0.8.1 precision fix removed constant-literal false positives that were concentrated in non-framework
+> code, so the 12-framework benchmark is essentially unchanged. The v0.8.0 figures above remain the dated
+> benchmark of record — deliberately held stable rather than churned for a negligible difference.
+
 > **ENGINE-VERSION NOTE.** The **v0.8.0** figures above supersede the historic pre-v0.3.6 record (8,509 /
 > 474 / 520, record date 2026-07-08, table further down). Two things moved, both by design:
 > - **Reachable-in-repo 474 → 596.** v0.8.0's revised taxonomy bands reachable, unguarded agent-action

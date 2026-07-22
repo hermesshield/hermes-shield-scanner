@@ -3,6 +3,27 @@
 All notable changes to the Hermes Shield scanner are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.8.1] — 2026-07-22 · multi-model AI backends + precision fix (public numbers unchanged)
+
+### Added
+- **Multi-model `--ai-backend`** — `anthropic`, `openai`, `venice`, `gemini` wired as **user-key** cloud backends
+  for the light `--ai` tier (keys from env — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `VENICE_API_KEY` /
+  `GEMINI_API_KEY` — **required, never stored; a missing key fails loud**). £0 to us. Endpoints are hard-coded
+  HTTPS (no env-overridable base URL — closes the egress-poisoning vector); only the model is tunable. The
+  HS-03 secret-redaction + size-cap + fencing is applied **before** any backend, so cloud backends inherit it.
+  `--ai-deep` stays Claude-only. The banner's `--ai` network disclosure now names the **actual** destination per
+  backend (a cloud backend is real egress, not "your local claude CLI").
+
+### Fixed
+- **Precision (fewer false REDs)** — constant-literal `__import__("re")` / `eval` / `exec` / `getattr`, a constant
+  `page.evaluate(CONST_JS, data)` body, and constant-host outbound writes are no longer flagged as
+  reachable-unguarded code-exec / RED. Every downgrade fires only on a **provably-inert** case; dynamic /
+  attacker-controlled forms stay RED (adversarially tested). Recall unchanged (85.7% on the adversarial corpus).
+
+### Benchmark
+- v0.8.1 re-run: **8,438 / 596 / 533** — within 0.1% of the v0.8.0 record (8,447 / 596 / 542); **not re-stamped**
+  (negligible; the removed false positives were concentrated in non-framework code). Numbers held stable.
+
 ## [0.8.0] — 2026-07-22 · actions-firewall + dedup-worst-band hardening (intentional core verdict change)
 
 **MINOR bump (SemVer): this is a deliberate core verdict-behaviour change — output is intentionally NOT

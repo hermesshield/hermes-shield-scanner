@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-shield-scanner"
-version = "0.8.0"
+version = "0.8.1"
 description = "Read-only static scanner for AI-agent codebases: finds dangerous action sinks, traces reachability from real entry points (with an opt-in sandboxed proof lane), attributes guard coverage, and rates findings honestly (reachable-in-repo vs install-liability)."
 readme = "README.md"
 requires-python = ">=3.10"
