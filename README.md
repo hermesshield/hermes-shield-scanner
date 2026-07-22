@@ -63,7 +63,7 @@ And no — this is not "just static analysis". It is **deterministic static anal
 **You never need a flag for a first scan.**
 
 ```bash
-pip install hermes-shield-scanner        # installs the current public release (0.8.1)
+pip install hermes-shield-scanner        # installs the current public release (0.8.2)
 
 hermes-shield demo                       # a real red report in ~10 seconds
 cd your-agent-repo && hermes-shield scan # scan your own agent — auto-detects the enclosing git repo
@@ -75,7 +75,7 @@ cd your-agent-repo && hermes-shield scan # scan your own agent — auto-detects 
 2. The **report opens itself** in your browser the moment the scan finishes.
 3. It then **offers a deeper AI pass** (`--ai-deep`) you can accept or decline — that's the whole first run.
 
-> **Version note:** `pip install` gets **0.8.1**, the current release. It adds **multi-model `--ai-backend`** (claude/ollama/anthropic/openai/venice/gemini, your own key) plus a precision fix (fewer false positives), on top of v0.8.0's actions-firewall verdict change. **Public benchmark numbers are unchanged** (held stable per release). Details in [CHANGELOG.md](CHANGELOG.md).
+> **Version note:** `pip install` gets **0.8.2**, the current release — a **security-hardening patch** over 0.8.1: it closes three false-assurance holes the 0.8.1 precision change opened (a hardcoded `exec()` backdoor, a cookie-exfil `page.evaluate`, and a string-reassignment soundness gap are all flagged again), while keeping 0.8.1's genuine false-positive fixes and multi-model `--ai-backend` (claude/ollama/anthropic/openai/venice/gemini, your own key). **Public benchmark numbers are unchanged** (held stable per release). Details in [CHANGELOG.md](CHANGELOG.md).
 
 ### First-run guide
 
