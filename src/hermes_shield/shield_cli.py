@@ -256,11 +256,18 @@ def main(argv=None):
                         help="AI-assist: fast, per-FILE novel-sink recall (uses your local `claude`, sends "
                              "code to Anthropic under YOUR account). Advisory, non-deterministic; OFF by "
                              "default. For the whole-repo, slower + deeper pass see --ai-deep.")
-        sp.add_argument("--ai-backend", dest="ai_backend", choices=("claude", "ollama"), default=None,
+        sp.add_argument("--ai-backend", dest="ai_backend",
+                        choices=("claude", "ollama", "anthropic", "openai", "venice", "gemini"),
+                        default=None,
                         help="AI-assist backend transport (default: claude, the historical path). "
                              "'ollama' runs a LOCAL, zero-egress model via localhost Ollama "
-                             "(HERMES_SHIELD_OLLAMA_HOST / HERMES_SHIELD_OLLAMA_MODEL). Only meaningful "
-                             "with --ai; absent => claude (byte-identical to today).")
+                             "(HERMES_SHIELD_OLLAMA_HOST / HERMES_SHIELD_OLLAMA_MODEL). "
+                             "'anthropic'/'openai'/'venice'/'gemini' send the SECRET-REDACTED file "
+                             "source to that cloud provider under YOUR OWN key "
+                             "(ANTHROPIC_API_KEY / OPENAI_API_KEY / VENICE_API_KEY / GEMINI_API_KEY — "
+                             "required, never stored; a missing key fails loud). Only meaningful with "
+                             "--ai (NOT --ai-deep, which stays Claude-only); absent => claude "
+                             "(byte-identical to today).")
         sp.add_argument("--semgrep", action="store_true",
                         help="enable the semgrep comparator tier (multi-language breadth; "
                              "deterministic; needs `semgrep` installed)")
@@ -353,11 +360,18 @@ def main(argv=None):
     # --ai / --semgrep are thin, documented switches over the underlying env flags.
     # Both degrade gracefully: a missing external tool never blocks the core scan.
     if args.ai:
-        if _tool_available("claude"):
+        # The claude-CLI availability gate only applies when the tier will actually USE the claude CLI.
+        # A non-claude backend (ollama / anthropic / openai / venice / gemini) must NOT be silently
+        # skipped just because the claude CLI is absent — its own failure modes (no daemon, missing
+        # X_API_KEY) fail loud inside the tier instead (visible as ai_error/ai_failure in the report).
+        _backend_choice = (getattr(args, "ai_backend", None)
+                           or os.getenv("HERMES_SHIELD_AI_BACKEND") or "claude").strip().lower()
+        if _backend_choice != "claude" or _tool_available("claude"):
             os.environ["HERMES_SHIELD_AI_TIER"] = "1"
         else:
             print("hermes-shield: --ai not available — the `claude` CLI is not installed/on PATH. "
-                  "Install Claude Code (https://claude.com/claude-code) and authenticate, then retry. "
+                  "Install Claude Code (https://claude.com/claude-code) and authenticate, then retry "
+                  "(or pick another transport via --ai-backend). "
                   "Continuing with the deterministic core scan.", file=sys.stderr)
     # --ai-backend is additive: it only selects the transport for the AI tier. Absent => the env stays
     # unset => the tier defaults to "claude" (byte-identical to today). Set only when explicitly chosen so

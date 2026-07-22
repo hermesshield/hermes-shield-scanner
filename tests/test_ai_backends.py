@@ -77,14 +77,17 @@ def test_default_and_unset_backend_route_to_claude_agent(monkeypatch):
     assert calls == ["m", "m", "m", None]
 
 
-def test_stub_backends_declared_but_not_wired():
-    """anthropic / openai / venice are pluggable interfaces but raise NotImplemented-style AIAgentError —
-    no hosted egress is added this slice."""
-    for bid in ("anthropic", "openai", "venice"):
-        propose = ai_backends.get_backend(bid)
+def test_cloud_backends_are_wired_and_fail_loud_without_key(monkeypatch):
+    """anthropic / openai / venice / gemini are WIRED (Loop 5) — with the key env MISSING they fail loud
+    AT CONSTRUCTION with an actionable 'set X_API_KEY' message, never a silent skip. The full cloud suite
+    (endpoint/auth/extraction/redaction, mocked HTTP) lives in test_ai_backends_cloud.py."""
+    for bid, env in (("anthropic", "ANTHROPIC_API_KEY"), ("openai", "OPENAI_API_KEY"),
+                     ("venice", "VENICE_API_KEY"), ("gemini", "GEMINI_API_KEY")):
+        monkeypatch.delenv(env, raising=False)
+        assert bid in ai_backends.WIRED_BACKENDS
         with pytest.raises(ai_assist.AIAgentError) as ei:
-            propose("prompt", 5)
-        assert f"{bid} backend not yet wired" in str(ei.value)
+            ai_backends.get_backend(bid)
+        assert f"set {env}" in str(ei.value)
 
 
 def test_unknown_backend_fails_loud():
