@@ -63,7 +63,7 @@ And no — this is not "just static analysis". It is **deterministic static anal
 **You never need a flag for a first scan.**
 
 ```bash
-pip install hermes-shield-scanner        # installs the current public release (0.7.1 today)
+pip install hermes-shield-scanner        # installs the current public release (0.8.0)
 
 hermes-shield demo                       # a real red report in ~10 seconds
 cd your-agent-repo && hermes-shield scan # scan your own agent — auto-detects the enclosing git repo
@@ -75,7 +75,7 @@ cd your-agent-repo && hermes-shield scan # scan your own agent — auto-detects 
 2. The **report opens itself** in your browser the moment the scan finishes.
 3. It then **offers a deeper AI pass** (`--ai-deep`) you can accept or decline — that's the whole first run.
 
-> **Version note:** `pip install` currently gets **0.7.1**, the first public release on PyPI. **0.8.0 is a pending release** (this tree) and is **not on PyPI until it is tagged**; until then 0.7.1 is what installs.
+> **Version note:** `pip install` gets **0.8.0**, the current release. It supersedes 0.7.x with the actions-firewall verdict change (reachable, unguarded agent-action sinks now band RED/AMBER instead of a false BLUE) plus dedup worst-band hardening — an intentional, more-severe core change. Details in [CHANGELOG.md](CHANGELOG.md).
 
 ### First-run guide
 

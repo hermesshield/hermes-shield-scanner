@@ -3,7 +3,7 @@
 All notable changes to the Hermes Shield scanner are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
-## [0.8.0] — 2026-07-18 · PENDING RELEASE (not yet tagged; not on PyPI — 0.7.1 is the current public release) · actions-firewall + dedup-worst-band hardening (intentional core verdict change)
+## [0.8.0] — 2026-07-22 · actions-firewall + dedup-worst-band hardening (intentional core verdict change)
 
 **MINOR bump (SemVer): this is a deliberate core verdict-behaviour change — output is intentionally NOT
 byte-identical to 0.7.x.** Two hardenings: (1) reachable, unguarded **agent-action sinks** (payment /
